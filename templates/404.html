@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Not Found · YaraBot</title>
+    <!-- Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lottie for the 404 animation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+    <style>
+        * { font-family: 'Inter', sans-serif; box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .wrap {
+            text-align: center;
+            max-width: 420px;
+        }
+
+        #error-lottie {
+            width: 200px;
+            height: 200px;
+            margin: 0 auto 8px;
+        }
+
+        h1 {
+            color: #2E3191;
+            font-weight: 700;
+            font-size: 28px;
+            margin: 0 0 10px;
+        }
+
+        p {
+            color: #6b7280;
+            font-size: 15px;
+            line-height: 1.6;
+            margin: 0 0 28px;
+        }
+
+        .go-back {
+            background: #2E3191;
+            color: #ffffff;
+            border: none;
+            border-radius: 24px;
+            padding: 12px 32px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.1s ease;
+        }
+        .go-back:hover  { background: #1E2070; }
+        .go-back:active { transform: scale(0.96); }
+    </style>
+</head>
+<body>
+
+<div class="wrap">
+    <div id="error-lottie"></div>
+
+    <h1>Page Not Found</h1>
+    <p>The page you're looking for doesn't exist.</p>
+
+    <button class="go-back" onclick="window.history.back()">Go Back</button>
+</div>
+
+<script>
+    // Mount after the DOM is ready so the container exists and is laid out.
+    document.addEventListener("DOMContentLoaded", function () {
+        if (typeof lottie === "undefined") return;   // animation is decorative
+        lottie.loadAnimation({
+            container: document.getElementById("error-lottie"),
+            renderer: "svg",
+            loop: true,
+            autoplay: true,
+            path: "/static/Error404.json"
+        });
+    });
+</script>
+
+</body>
+</html>
