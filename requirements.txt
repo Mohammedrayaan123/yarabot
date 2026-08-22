@@ -1,0 +1,18 @@
+
+# --- Flask chatbot backend (app.py) ---
+Flask==3.1.3
+python-dotenv==1.0.1
+mysql-connector-python==26.7.0
+
+# Gemini RAG lane (gemini_rag.py) — official Google Gen AI SDK
+google-genai==2.3.0
+
+# Groq fallback (gemini_rag.py) — Groq has no dedicated SDK here; it's
+# calledf through its OpenAI-compatible endpoint using the openai package
+openai==3.3.1
+
+# Production WSGI server for Render
+gunicorn==23.0.0
+
+streamlit==1.60.0
+pandas==3.0.5
