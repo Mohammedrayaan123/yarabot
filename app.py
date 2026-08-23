@@ -151,6 +151,26 @@ def is_pure_greeting(question):
     return cleaned in GREETING_ONLY_PHRASES
 
 
+# The intent names each role's answer_*() function actually recognizes
+# (mirrors the possible_intents lists passed to detect_intent() inside
+# answer_student/answer_teacher/answer_principal below), minus
+# greeting/thanks/help - those are already handled for free by
+# is_pure_greeting() before this is ever consulted. Used by use_nlp_lane()
+# to ask NLP directly "do you know how to answer this" instead of guessing
+# from pronouns.
+ROLE_PERSONAL_INTENTS = {
+    "student": ["attendance", "exam", "timetable", "fee", "identity",
+                "roll_number", "my_class", "next_period", "subject_teacher"],
+    "teacher": ["period_count", "timetable", "classes_assigned", "next_class",
+                "current_class", "free_periods", "periods_remaining", "teacher_identity"],
+    "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
+                  "class_wise_count", "teacher_location", "classroom_occupant",
+                  "free_teachers", "teacher_schedule_lookup",
+                  "school_wide_subject_teacher", "low_attendance_count",
+                  "pending_fees_count"],
+}
+
+
 def use_nlp_lane(question, role):
     """
     Pick which lane answers this question.
@@ -158,31 +178,57 @@ def use_nlp_lane(question, role):
     True  -> Lane 1: NLP + MySQL (personal data / school records)
     False -> Lane 2: Gemini + almanac (general school knowledge)
 
-    Pure greetings/thanks/help-requests always go to NLP first, regardless
-    of role, since those cost nothing and nlp_helpers.py already handles
-    them (see is_pure_greeting).
+    NLP-FIRST routing: after the pure-greeting shortcut and the
+    general-knowledge check below, ask NLP directly whether it recognizes
+    the question as one of ITS OWN intents for this role, and trust that
+    over guessing from pronouns/wording.
 
-    Teachers and principals then go to the MySQL lane first because that is
-    what almost all of their questions need - EXCEPT questions that clearly
-    match GENERAL_KNOWLEDGE_SIGNALS, which go straight to Gemini so wording
-    overlap with NLP's timetable/classes keywords can't hijack an almanac
-    question. If the NLP engine doesn't recognize a question, the existing
-    fallback in the /api/chat route still forwards it to Gemini as a last
-    resort.
+    This replaces the old approach for non-DB-first roles (students), which
+    gated ENTIRELY on PERSONAL_SIGNALS (pronouns like "my"/"I") before ever
+    consulting NLP. That caused real, confirmed failures: "mondays periods"
+    and "time table?" have no first-person wording at all, so they were sent
+    straight to Gemini - which correctly says it doesn't have that info,
+    since it's not general knowledge - even though NLP already knows how to
+    answer day-specific timetable questions (confirmed working when the same
+    question was phrased with "I", e.g. "what do I have at 5th period on
+    monday?"). Now NLP gets asked directly regardless of phrasing, and only
+    a genuine "no matching intent" falls through toward Gemini.
 
-    Students ask a genuine mix of personal and general questions, so their
-    routing stays based on first-person wording (PERSONAL_SIGNALS already
-    correctly separates "what's my exam schedule" from "when is the exam
-    schedule for grade 9" via the word "my", so no extra check is needed
-    here for students).
+    The general-knowledge check has to run BEFORE the NLP-first check, for
+    every role, not just teachers/principals: without it, a question like
+    "when is the exam schedule for grade 9" would score against NLP's
+    timetable intent (keyword "schedule") and incorrectly return the
+    ASKER's own timetable instead of being forwarded to the almanac. The
+    pronoun check below runs first specifically to protect genuinely
+    personal phrasing that happens to overlap a general-knowledge phrase -
+    e.g. "what's my exam schedule" contains the general-knowledge phrase
+    "exam schedule", so without checking pronouns first it would wrongly
+    be classified as a general question.
+
+    Teachers and principals never used PERSONAL_SIGNALS at all (their
+    questions are almost never worded in the first person), so that check
+    is skipped for them, same as before. If NLP still finds no matching
+    intent for them, they default to the NLP lane anyway - unchanged from
+    before - relying on the existing NLP-miss fallback in the /api/chat
+    route to forward to Gemini as a last resort, rather than risking a
+    false negative sending a real DB question to Gemini outright.
     """
     if is_pure_greeting(question):
         return True
-    if role in DB_FIRST_ROLES:
-        if is_general_knowledge_question(question):
-            return False
+
+    if role not in DB_FIRST_ROLES and is_personal_question(question):
         return True
-    return is_personal_question(question)
+
+    if is_general_knowledge_question(question):
+        return False
+
+    if detect_intent(question, ROLE_PERSONAL_INTENTS.get(role, [])) is not None:
+        return True
+
+    if role in DB_FIRST_ROLES:
+        return True
+
+    return False
 
 app = Flask(__name__)
 
@@ -287,6 +333,35 @@ def query(sql, params=None, fetch=False, many=False):
     except Exception as e:
         print(f"DB error: {e}")
         return None
+
+
+# =========================================================
+# HEALTH CHECK
+# Deliberately outside AUTH ROUTES and doesn't touch session/login at all -
+# an external uptime monitor needs to reach this with no credentials. Uses
+# get_db() directly (not the query() helper) so a bad SELECT 1 can't be
+# confused with query()'s normal "no matching row" None return - here, ANY
+# failure (can't connect, or the query itself errors) means unhealthy.
+# Also deliberately never touches the NLP or Gemini/Groq lanes, so pinging
+# this can't burn a quota-limited AI API call or run any DB write.
+# =========================================================
+@app.route("/healthz")
+def healthz():
+    conn = get_db()
+    if conn is None:
+        return jsonify({"status": "error", "detail": "database unreachable"}), 503
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as e:
+        print(f"[HEALTHZ] DB error: {e}")
+        return jsonify({"status": "error", "detail": "database unreachable"}), 503
+
+    return jsonify({"status": "ok"}), 200
 
 
 # =========================================================
@@ -1203,6 +1278,21 @@ def answer_teacher(question, teacher_id):
                 "🙋 **My details** — *'who am i'*")
 
     if intent == "period_count":
+        # period_count's own phrase list includes "periods today" - without
+        # this, a question containing "today" (or an explicit day name) was
+        # silently answered with the WEEKLY total instead. Filtering only
+        # kicks in when a day is actually mentioned; with none, this stays
+        # the exact same weekly-total query/wording as before.
+        day = extract_day_from_question(question)
+        if day:
+            result = query(
+                "SELECT COUNT(*) FROM timetable WHERE teacher_id=%s AND LOWER(day)=%s",
+                (teacher_id, day), fetch=True
+            )
+            if result:
+                return f"You have **{result[0]} periods** scheduled for **{day.capitalize()}**."
+            return "I couldn't retrieve your period count right now."
+
         result = query(
             "SELECT COUNT(*) FROM timetable WHERE teacher_id=%s",
             (teacher_id,), fetch=True

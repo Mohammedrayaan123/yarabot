@@ -29,19 +29,34 @@ CONTRACTIONS = {
 # after with fuzzy typo-matching.
 INTENT_DATA = {
     "attendance": {
-        "phrases": ["how many days present", "how many days absent", "attendance percentage"],
+        # Widened after research into real short-form/casual phrasing
+        # (attendance is consistently one of the top-asked categories in
+        # school chatbots) - "attendance %" and "check attendance" are
+        # typical terse phone-typed phrasings with no verb/pronoun at all.
+        "phrases": ["how many days present", "how many days absent", "attendance percentage",
+                    "attendance %", "my attendance", "attendance status", "attendance record",
+                    "check attendance", "how's my attendance"],
         "keywords": ["attendance", "present", "presence", "absent", "absentee", "bunk", "bunked"],
     },
     "exam": {
-        "phrases": ["exam date", "next exam", "when is my exam", "test date"],
+        "phrases": ["exam date", "next exam", "when is my exam", "test date",
+                    "exam dates", "upcoming exam", "upcoming exams", "next test",
+                    "my exam date", "check exam date"],
         "keywords": ["exam", "exams", "test", "tests", "examination", "examinations", "quiz"],
     },
     "timetable": {
-        "phrases": ["my timetable", "my schedule", "class schedule", "today's classes"],
+        # "time table" (as two words) is a real gap: it doesn't literally
+        # contain "timetable" as one token, so it scored nothing before -
+        # confirmed via real user testing routing it to Gemini instead of NLP.
+        "phrases": ["my timetable", "my schedule", "class schedule", "today's classes",
+                    "time table", "class routine", "today's schedule", "weekly timetable",
+                    "my periods today", "what's my schedule"],
         "keywords": ["timetable", "schedule", "periods", "classes", "routine"],
     },
     "fee": {
-        "phrases": ["fee status", "fees paid", "school fees"],
+        "phrases": ["fee status", "fees paid", "school fees",
+                    "fees status", "fee due", "fees due", "is my fee paid",
+                    "check fees", "outstanding fees", "fee balance"],
         "keywords": ["fee", "fees", "payment", "paid", "dues", "due"],
     },
     "period_count": {
