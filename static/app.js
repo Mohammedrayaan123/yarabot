@@ -138,19 +138,72 @@ async function handleLogin() {
         });
         const data = await res.json();
 
+        // Reset the "Signing in..." spinner state before branching, so the
+        // lockout branch below can re-disable the button without it being
+        // undone by this unconditional reset.
+        setLoginLoading(btn, false);
+
         if (data.success) {
             userRole = data.role;
             showChatPage(data.profile);
+        } else if (res.status === 429 && data.retry_after) {
+            startLoginLockoutCountdown(data.retry_after);
         } else {
             errorEl.textContent = data.error;
             errorEl.classList.remove("hidden");
         }
+        return;
     } catch (e) {
         errorEl.textContent = "Connection error. Is the server running?";
         errorEl.classList.remove("hidden");
     }
 
     setLoginLoading(btn, false);
+}
+
+// Tracks the running countdown's interval ID so a new lockout response
+// (or another handleLogin call) can cancel a previous countdown instead of
+// stacking multiple timers.
+let _loginLockoutInterval = null;
+
+/**
+ * Shows a live minutes:seconds countdown in the login error box and keeps
+ * the sign-in button disabled until it reaches zero, at which point the
+ * button re-enables itself automatically - no page refresh needed.
+ */
+function startLoginLockoutCountdown(seconds) {
+    const errorEl = document.getElementById("login-error");
+    const btn = document.getElementById("login-btn");
+
+    if (_loginLockoutInterval) {
+        clearInterval(_loginLockoutInterval);
+        _loginLockoutInterval = null;
+    }
+
+    let remaining = seconds;
+
+    const render = () => {
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        const timeStr = `${mins}:${String(secs).padStart(2, "0")}`;
+        errorEl.textContent = `Too many failed attempts. Please try again in ${timeStr}.`;
+        errorEl.classList.remove("hidden");
+    };
+
+    render();
+    btn.disabled = true;
+
+    _loginLockoutInterval = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+            clearInterval(_loginLockoutInterval);
+            _loginLockoutInterval = null;
+            errorEl.classList.add("hidden");
+            btn.disabled = false;
+            return;
+        }
+        render();
+    }, 1000);
 }
 
 /**

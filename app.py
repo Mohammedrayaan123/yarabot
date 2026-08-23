@@ -26,6 +26,7 @@ import re
 import secrets
 import time
 import json
+import math
 
 # Add parent directory to path so we can import our existing helper files
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -246,6 +247,17 @@ def _clear_failed_logins(key):
     _failed_logins.pop(key, None)
 
 
+def _login_retry_after(key):
+    """Seconds left until this key's lockout window expires. Rounded up
+    (not down) so the frontend countdown never hits 0 while still locked."""
+    entry = _failed_logins.get(key)
+    if not entry:
+        return 0
+    _, window_start = entry
+    remaining = LOGIN_ATTEMPT_WINDOW - (time.time() - window_start)
+    return max(0, math.ceil(remaining))
+
+
 # =========================================================
 # DATABASE HELPER
 # =========================================================
@@ -331,18 +343,48 @@ def login():
     # Rate-limit by IP+username so a script can't brute-force passwords
     rate_key = f"{request.remote_addr}:{username.lower()}"
     if _login_rate_limited(rate_key):
+        retry_after = _login_retry_after(rate_key)
         return jsonify({
             "success": False,
-            "error": "Too many failed attempts. Please try again in a few minutes."
+            "error": "Too many failed attempts. Please try again later.",
+            "retry_after": retry_after
         }), 429
 
-    result = query(
-        "SELECT user_id, password_hash, role, linked_id FROM users WHERE username=%s",
-        (username,), fetch=True
-    )
+    # Looked up directly here (not via the shared query() helper) so a DB
+    # connection failure can be told apart from "no matching user" - query()
+    # returns None for both, which is exactly the ambiguity that caused a
+    # dead database to be shown to users as "wrong password".
+    conn = get_db()
+    if conn is None:
+        # DB itself is unreachable - this is not a failed credential attempt,
+        # so it must NOT count toward the lockout, and it gets its own honest
+        # message rather than the generic invalid-credentials one.
+        return jsonify({
+            "success": False,
+            "error": "Unable to connect right now, please try again in a moment."
+        }), 503
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id, password_hash, role, linked_id FROM users WHERE username=%s",
+            (username,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as e:
+        print(f"DB error during login: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Unable to connect right now, please try again in a moment."
+        }), 503
 
     # Same generic error whether the username doesn't exist or the password is
     # wrong - distinguishing them lets an attacker enumerate valid usernames.
+    # This still applies here: only an actual DB failure (above) gets a
+    # different message, not "username exists but password is wrong" vs.
+    # "username doesn't exist" - those two remain identical.
     if not result or not verify_password(password, result[1]):
         _record_failed_login(rate_key)
         return jsonify({"success": False, "error": "Invalid username or password."})
@@ -1289,4 +1331,7 @@ def answer_principal(question):
 # =========================================================
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(debug=debug_mode, port=5000)
+    # Render (and most hosts) assign the port to listen on via $PORT -
+    # default to 5000 so local dev is unaffected.
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=debug_mode, port=port)
