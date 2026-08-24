@@ -14,6 +14,10 @@
 // =========================================================
 let userRole = null;
 let messageCount = 0;
+// Guards handleSessionExpired() against firing more than once if multiple
+// in-flight requests all come back 401 around the same time - reset to
+// false again once a fresh login succeeds (see showChatPage()).
+let sessionExpiredHandled = false;
 
 
 // =========================================================
@@ -267,6 +271,10 @@ async function restoreSession() {
 // SHOW CHAT PAGE
 // =========================================================
 function showChatPage(profile) {
+    // A fresh, successful session is in place again - re-arm the
+    // session-expiry guard so a LATER expiry can trigger it again.
+    sessionExpiredHandled = false;
+
     document.getElementById("login-page").classList.add("hidden");
     document.getElementById("chat-page").classList.remove("hidden");
     document.getElementById("chat-page").classList.add("flex");
@@ -386,16 +394,61 @@ function buildQuickActions() {
     const container = document.getElementById("quick-actions");
     const actions = quickActions[userRole] || [];
 
+    // Tailwind gotcha, found via a mobile audit: the CDN/Play build's JIT
+    // compiler only reliably generates CSS for utility classes it has seen
+    // SOMEWHERE in the page - including ones injected dynamically after
+    // load, AS LONG AS that exact class also appears at least once in the
+    // static HTML (templates/index.html). A class used ONLY here, inside a
+    // JS template string that never runs until buildQuickActions() fires,
+    // was silently generating NO CSS at all - these buttons rendered with
+    // zero padding (px-3.5/py-2.5 previously) even though the class names
+    // were correctly present in the DOM. Fixed by switching to px-4/py-3,
+    // which are already used elsewhere in the static HTML. Keep this in
+    // mind for any NEW class added only in JS-built markup like this.
     container.innerHTML = actions.map(action => `
         <button
             onclick="sendQuick('${action.msg}')"
             class="chip w-full text-left text-sm text-gray-700 bg-white border border-gray-200
-                   rounded-xl px-3.5 py-2.5
+                   rounded-xl px-4 py-3
                    transition-all duration-150 font-medium"
         >
             ${action.label}
         </button>
     `).join("");
+}
+
+
+// =========================================================
+// SESSION EXPIRY
+// /api/chat checks the Flask session BEFORE deciding NLP vs Gemini lane
+// (see app.py), so a 401 from it can only ever come back as a normal JSON
+// response, never mid-SSE-stream - by the time sendMessage() would hand a
+// response to handleStreamingReply(), a 401 has already been ruled out.
+// One check, made right after the fetch resolves and before the
+// streaming/non-streaming branch, therefore covers both lanes.
+//
+// Previously a 401 here fell through to the ordinary reply-rendering path
+// and showed the raw {"error":"Not logged in."} JSON inside a chat bubble,
+// leaving the user stuck typing into a chat that could never work again
+// without a manual refresh.
+// =========================================================
+function handleSessionExpired() {
+    if (sessionExpiredHandled) return;
+    sessionExpiredHandled = true;
+
+    removeTypingBubble();
+    clearChat();
+    userRole = null;
+
+    document.getElementById("chat-page").classList.add("hidden");
+    document.getElementById("chat-page").classList.remove("flex");
+    // Same login screen shown on initial page load / a failed restoreSession()
+    // - no separate "expired" UI to build or keep in sync with it.
+    document.getElementById("login-page").classList.remove("hidden");
+
+    const errorEl = document.getElementById("login-error");
+    errorEl.textContent = "Your session has expired, please log in again.";
+    errorEl.classList.remove("hidden");
 }
 
 
@@ -433,6 +486,11 @@ async function sendMessage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message })
         });
+
+        if (res.status === 401) {
+            handleSessionExpired();
+            return;
+        }
 
         // NLP-lane answers are instant plain JSON (unchanged). Gemini-lane
         // answers come back as an SSE stream instead - tell the two apart
@@ -554,7 +612,10 @@ function buildMessageWrapper(role) {
     }`;
 
     const timestamp = document.createElement("div");
-    timestamp.className = "text-xs text-gray-400 mt-1 mx-1";
+    // gray-600, not the lighter gray-400/300 shades elsewhere in this file
+    // originally used - those failed WCAG AA contrast (2.5:1 and 1.5:1
+    // against white, need 4.5:1), caught by an axe-core/Lighthouse audit.
+    timestamp.className = "text-xs text-gray-600 mt-1 mx-1";
     timestamp.textContent = now;
 
     // Avatar
@@ -646,7 +707,7 @@ function clearChat() {
     // Remove all messages but keep the greeting
     container.innerHTML = `
         <div id="greeting" class="flex flex-col items-center justify-center h-full text-center pb-20">
-            <div id="greeting-time" class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2"></div>
+            <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2"></div>
             <h2 id="greeting-name" class="text-4xl font-bold text-gray-900 tracking-tight mb-2"></h2>
             <p id="greeting-sub" class="text-base text-gray-500"></p>
         </div>
