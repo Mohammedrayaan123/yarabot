@@ -250,16 +250,41 @@
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
             }
         }
+
+        /* Real bug fix: replaces Tailwind's `h-screen` (100vh) on body/
+           login-page/chat-page. 100vh is a STATIC unit - on mobile Safari/
+           Chrome it does NOT shrink when the on-screen keyboard opens, so
+           the browser instead scrolls the whole (supposedly overflow:hidden)
+           page upward to keep the focused chat input visible above the
+           keyboard - taking the header/hamburger button off the top of the
+           screen with it, with no way to scroll back up to it while the
+           keyboard stays open. This is what "the hamburger disappears once
+           you send a message" actually was: sending a message requires
+           focusing the input first, which is what triggers this.
+           100dvh (dynamic viewport height) is defined to track the ACTUAL
+           visible viewport, so on any browser that understands it the page
+           correctly shrinks around the keyboard instead of needing to
+           scroll at all - the header just never leaves the screen. The
+           100vh line stays first as a fallback: if `dvh` isn't recognized,
+           that whole second declaration is invalid and ignored, leaving the
+           100vh already set - not "no height at all". Uses a dedicated
+           class (not fighting Tailwind's own h-screen utility on
+           specificity/cascade-order, which is fragile - see the
+           #sidebar.sidebar-open rule above for another case of that). */
+        .full-height {
+            height: 100vh;
+            height: 100dvh;
+        }
     </style>
 </head>
-<body class="bg-white h-screen overflow-hidden">
+<body class="bg-white full-height overflow-hidden">
 
 <!-- ===================== LOGIN PAGE ===================== -->
 <!-- <main>, not <div>: exactly one of login-page/chat-page is visible at a
      time (the other has `hidden`), so axe/screen readers only ever see one
      <main> landmark in the accessibility tree at once - satisfies
      "landmark-one-main" without needing a third wrapper element. -->
-<main id="login-page" class="h-screen flex flex-col items-center justify-center px-4" style="background: var(--brand-tint);">
+<main id="login-page" class="full-height flex flex-col items-center justify-center px-4" style="background: var(--brand-tint);">
     <div class="w-full max-w-sm">
         <!-- Logo -->
         <div class="text-center mb-8">
@@ -326,7 +351,7 @@
 
 
 <!-- ===================== CHAT PAGE ===================== -->
-<main id="chat-page" class="hidden h-screen flex">
+<main id="chat-page" class="hidden full-height flex">
     <!-- Visually hidden - the chat page has no visible h1 (the "YaraBot"
          h1 lives on the login page, which is gone by the time this is
          shown), so screen readers had no page-level heading at all here. -->
