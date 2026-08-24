@@ -631,7 +631,7 @@ function buildMessageWrapper(role) {
         // Size comes from --bot-size-chat in index.html, not a hardcoded value here.
         avatar.id = `lottie-bot-${Date.now()}-${lottieIdCounter++}`;
         avatar.classList.add("bot-lottie-chat");
-        const size = botLottieSize("--bot-size-chat", "32px");
+        const size = botLottieSize("--bot-size-chat", "44px");
         avatar.style.width = size;
         avatar.style.height = size;
     } else {
@@ -680,7 +680,7 @@ function showTypingBubble() {
     // visibly swap when the reply lands.
     wrapper.innerHTML = `
         <div id="lottie-bot-typing" class="bot-lottie-chat flex-shrink-0"
-             style="width:${botLottieSize("--bot-size-chat", "32px")};height:${botLottieSize("--bot-size-chat", "32px")};"></div>
+             style="width:${botLottieSize("--bot-size-chat", "44px")};height:${botLottieSize("--bot-size-chat", "44px")};"></div>
         <div class="typing-bubble-pulse msg-bot px-4 py-3 flex items-center gap-1.5">
             <span class="typing-dot"></span>
             <span class="typing-dot"></span>
