@@ -104,20 +104,20 @@ const subGreetings = [
 
 const quickActions = {
     student: [
-        { label: "📊 My Attendance",  msg: "what is my attendance" },
-        { label: "📅 Upcoming Exams", msg: "when are my exams" },
-        { label: "🕐 My Timetable",   msg: "show me my timetable" },
-        { label: "💰 Fee Status",     msg: "what is my fee status" },
+        { label: "My Attendance",  msg: "what is my attendance" },
+        { label: "Upcoming Exams", msg: "when are my exams" },
+        { label: "My Timetable",   msg: "show me my timetable" },
+        { label: "Fee Status",     msg: "what is my fee status" },
     ],
     teacher: [
-        { label: "🕐 My Schedule",    msg: "show me my timetable" },
-        { label: "📊 My Periods",     msg: "how many periods do I have" },
-        { label: "🏫 My Classes",     msg: "which classes do I teach" },
+        { label: "My Schedule",    msg: "show me my timetable" },
+        { label: "My Periods",     msg: "how many periods do I have" },
+        { label: "My Classes",     msg: "which classes do I teach" },
     ],
     principal: [
-        { label: "👥 Total Students", msg: "how many students are there" },
-        { label: "👨‍🏫 Total Teachers", msg: "how many teachers do we have" },
-        { label: "📊 Class Breakdown", msg: "students per class" },
+        { label: "Total Students", msg: "how many students are there" },
+        { label: "Total Teachers", msg: "how many teachers do we have" },
+        { label: "Class Breakdown", msg: "students per class" },
     ]
 };
 

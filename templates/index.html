@@ -55,8 +55,8 @@
                One knob per place the mascot appears. Change the value here
                and every instance of that type resizes. */
             --bot-size-login:   140px;  /* big mascot on the login page   */
-            --bot-size-sidebar:  56px;  /* sidebar header, next to logo   */
-            --bot-size-chat:     44px;  /* avatar beside each bot message */
+            --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
+            --bot-size-chat:     94px;  /* avatar beside each bot message */
         }
 
         /* Mascot containers - sized from the variables above */
@@ -393,19 +393,14 @@
             </svg>
         </button>
 
-        <!-- School header: Lottie mascot | school logo | name -->
+        <!-- School header: Lottie mascot | wordmark. No school logo here
+             (deliberately - kept everywhere else it's used, e.g. the login
+             page, just not this row) - the Quicksand wordmark carries the
+             brand identity on its own at this size. -->
         <div class="px-5 pt-6 pb-4">
             <div class="flex items-center gap-2 mb-5">
                 <div id="sidebar-lottie" class="bot-lottie-sidebar flex-shrink-0"></div>
-                <img
-                    src="/static/Yaralogo.png"
-                    alt="Yara International School logo"
-                    class="flex-shrink-0"
-                    width="36"
-                    height="23"
-                    style="width:36px;border-radius:10px;object-fit:contain;"
-                />
-                <span class="font-quicksand text-gray-800 text-sm">YaraBot</span>
+                <span class="font-quicksand text-gray-800 text-2xl">YaraBot</span>
             </div>
 
             <!-- ID Card -->
@@ -438,7 +433,7 @@
                     class="flex-1 text-sm text-gray-500 hover:text-gray-700 bg-white
                            hover:bg-gray-100 border border-gray-200 rounded-xl py-3 transition-all"
                 >
-                    🗑 Clear
+                    Clear
                 </button>
                 <button
                     onclick="handleLogout()"
