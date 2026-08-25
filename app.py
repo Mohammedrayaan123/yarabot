@@ -32,8 +32,8 @@ import math
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
-from nlp_helpers import detect_intent
-from gemini_rag import gemini_answer_stream
+from nlp_helpers import detect_intent, detect_intent_with_score
+from gemini_rag import gemini_answer_stream, almanac_top_score
 from config import DB_CONFIG
 import mysql.connector
 
@@ -171,6 +171,25 @@ ROLE_PERSONAL_INTENTS = {
 }
 
 
+# Fix 2 of the NLP-vs-Gemini collision fix (see use_nlp_lane): thresholds
+# for the almanac-overlap tie-break.
+#
+# ALMANAC_STRONG_MATCH_SCORE: how many overlapping content words with the
+# single best-matching almanac section counts as "this is clearly about
+# real almanac content", not a coincidental one-word overlap. 2 was picked
+# by checking it against the real almanac: e.g. "teachers day" scores 2
+# against the "Teacher's Day: 5th September 2026" section (both "teachers"
+# and "day" appear there) - a single stray word overlap (score 1) is too
+# weak on its own to override a genuine NLP match, but this is not.
+#
+# A WEAK NLP match (score < NLP_PHRASE_MATCH_SCORE) means the winning
+# intent scored purely from bare keyword(s), never phrase text - matches
+# nlp_helpers.score_intent()'s +3-per-phrase / +1-per-keyword scoring, so
+# any score under 3 is keyword-only by construction.
+ALMANAC_STRONG_MATCH_SCORE = 2
+NLP_PHRASE_MATCH_SCORE = 3
+
+
 def use_nlp_lane(question, role):
     """
     Pick which lane answers this question.
@@ -207,11 +226,42 @@ def use_nlp_lane(question, role):
 
     Teachers and principals never used PERSONAL_SIGNALS at all (their
     questions are almost never worded in the first person), so that check
-    is skipped for them, same as before. If NLP still finds no matching
-    intent for them, they default to the NLP lane anyway - unchanged from
-    before - relying on the existing NLP-miss fallback in the /api/chat
-    route to forward to Gemini as a last resort, rather than risking a
-    false negative sending a real DB question to Gemini outright.
+    is skipped for them. If NLP finds no matching intent for them at all,
+    they still default to the NLP lane - UNLESS the almanac tie-break below
+    finds strong evidence otherwise, in which case Gemini wins directly
+    instead of wasting a round-trip through a guaranteed NLP miss (the
+    existing NLP-miss fallback in the /api/chat route would have forwarded
+    it to Gemini anyway, one step later).
+
+    SYSTEMIC collision fix (this is the second of two fixes for a recurring
+    bug category - "exam schedule" vs. timetable, then "teachers day" vs.
+    subject_teacher/total_teachers - a single ambiguous English word shared
+    between a personal-data intent's keywords and real almanac content):
+
+    Fix 1 lives in nlp_helpers.py itself: score_intent() no longer awards a
+    point for a bare AMBIGUOUS_KEYWORDS match with no phrase match and no
+    first-person wording in the question - "teachers day" no longer scores
+    anything for subject_teacher/total_teachers at all, one level below
+    this function.
+
+    Fix 2 is here: even when NLP DOES still find a match, if it's a WEAK one
+    (keyword-only, no phrase - score < NLP_PHRASE_MATCH_SCORE) and the
+    question ALSO scores a STRONG match against real almanac content
+    (>= ALMANAC_STRONG_MATCH_SCORE, and at least as strong as the NLP
+    score), Gemini wins the tie. The same almanac check also covers a plain
+    NLP miss (no intent at all) for DB-first roles, which otherwise default
+    straight to the NLP lane regardless - a strong almanac match there is
+    good evidence the question was never a DB question to begin with.
+
+    This is what makes the fix self-maintaining: it doesn't matter whether
+    the colliding word was audited into AMBIGUOUS_KEYWORDS or not, and it
+    doesn't matter whether the almanac content is an event nlp_helpers.py
+    has ever heard of - ANY future almanac addition ("Founders' Day",
+    "Alumni Meet", whatever) is automatically protected, because this
+    checks against the almanac's actual current content, not a hardcoded
+    list of known event names. A weak or missing NLP match becomes Gemini's
+    problem, and Gemini's "I don't have that information" fallback is a
+    safer failure mode than a wrong personal-data-flavored non-answer.
     """
     if is_pure_greeting(question):
         return True
@@ -222,11 +272,26 @@ def use_nlp_lane(question, role):
     if is_general_knowledge_question(question):
         return False
 
-    if detect_intent(question, ROLE_PERSONAL_INTENTS.get(role, [])) is not None:
+    intent, nlp_score = detect_intent_with_score(question, ROLE_PERSONAL_INTENTS.get(role, []))
+
+    # Phrase-backed match (score >= 3): trust it outright, no need to even
+    # check the almanac - a real phrase match is strong enough evidence on
+    # its own (and Fix 1 already keeps bare-keyword matches honest).
+    if intent is not None and nlp_score >= NLP_PHRASE_MATCH_SCORE:
+        return True
+
+    almanac_score = almanac_top_score(question)
+    strong_almanac_match = almanac_score >= ALMANAC_STRONG_MATCH_SCORE
+
+    if intent is not None:
+        # Weak (keyword-only) match - only give it up if the almanac has at
+        # least as much evidence for the general-knowledge reading.
+        if strong_almanac_match and almanac_score >= nlp_score:
+            return False
         return True
 
     if role in DB_FIRST_ROLES:
-        return True
+        return not strong_almanac_match
 
     return False
 
@@ -779,24 +844,42 @@ def handle_next_period(student_id):
 
 
 def handle_subject_teacher(question, student_id, known_subjects):
-    """Finds who teaches a specific subject to this student's class."""
+    """Finds who teaches a specific subject to this student's class.
+
+    A subject can legitimately be taught by more than one teacher across
+    the week (confirmed via testing: one student's class had 5 different
+    Math teachers across 5 periods) - fetchall(), not fetchone(), and both
+    the single- and multiple-teacher cases are handled explicitly. The
+    previous fetchone() version left the query's other rows unread, which
+    mysql-connector raises as an "Unread result found" error on the next
+    query - silently swallowed by query()'s except block and surfaced to
+    the student as a wrong "couldn't find a teacher" answer despite a real
+    match existing.
+    """
     subject = extract_subject_from_question(question, known_subjects)
 
     if not subject:
         return "Which subject would you like to know the teacher for?"
 
-    result = query("""
+    results = query("""
         SELECT DISTINCT te.name
         FROM timetable t
         JOIN subjects s ON t.subject_id = s.subject_id
         JOIN teachers te ON t.teacher_id = te.teacher_id
         JOIN students st ON st.class = t.class
         WHERE st.student_id = %s AND s.subject_name = %s
-    """, (student_id, subject), fetch=True)
+    """, (student_id, subject), fetch=True, many=True)
 
-    if result:
-        return f"**{subject}** is taught by **{result[0]}**."
-    return f"I couldn't find a teacher for {subject} in your class."
+    if not results:
+        return f"I couldn't find a teacher for {subject} in your class."
+
+    names = sorted(name for (name,) in results)
+
+    if len(names) == 1:
+        return f"**{subject}** is taught by **{names[0]}**."
+
+    teacher_list = ", ".join(f"**{n}**" for n in names)
+    return f"**{subject}** is taught by multiple teachers this week: {teacher_list}."
 
 
 def handle_student_timetable(question, student_id):

@@ -197,6 +197,100 @@ INTENT_DATA = {
 }
 
 
+# ---- Ambiguous keywords ----
+# Common English words that legitimately belong to a personal-data intent's
+# keyword list, but are ALSO plausible inside a general-knowledge/almanac
+# question ("teachers day", "exam week dates", "which classes are on
+# holiday"). Audited once across every intent in INTENT_DATA above (see the
+# project notes for the full per-intent breakdown, including keywords
+# considered and NOT flagged).
+#
+# A BARE match on one of these (no phrase match backing it up, no personal
+# pronoun anywhere in the question) is not enough on its own to claim a
+# question for NLP - see score_intent() below. This is a ONE-TIME structural
+# tightening of the scoring rules, not a per-incident patch list: it does
+# NOT need a new entry every time a new almanac event is added later (that
+# growing-list failure mode is exactly what use_nlp_lane()'s almanac-overlap
+# check in app.py exists to catch instead, automatically, with no code
+# change here at all).
+AMBIGUOUS_KEYWORDS = {
+    # teacher/staff-related - collide with almanac event names ("Teacher's
+    # Day"), PTM content, staff lists
+    "teacher", "teachers", "teach", "teaches", "teaching", "staff",
+    # exam-related - collide with the almanac's own exam calendar content
+    "exam", "exams", "test", "tests", "examination", "examinations",
+    # schedule/timetable-related - collide with exam schedules, PTM
+    # schedules, academic calendar content
+    "schedule", "timetable", "routine",
+    # class/grade-related - "class"/"classes" appears constantly in almanac
+    # text as a GRADE reference ("Classes I-III", "Class IX & XI"), not a
+    # personal "my class" reference. ("classwise" is NOT included here -
+    # see the "considered but not flagged" list below.)
+    "class", "classes",
+    # NOTE: "period"/"periods" was considered (a "period" can mean a general
+    # TIME PERIOD, e.g. "admission period") but checked against the real
+    # school_almanac.txt and found ZERO occurrences of either word anywhere
+    # in it - and tightening it broke a real, previously-confirmed-working
+    # case ("mondays periods" for a student, caught by live regression
+    # testing before this shipped). Left OFF the list: no real collision
+    # risk found, and it has a real cost. If a future almanac addition ever
+    # legitimately uses "period" in a way that collides, the almanac-overlap
+    # check (Fix 2, in app.py) is the intended safety net for exactly that -
+    # not tightening this list further on a hypothetical.
+    #
+    # student-related - appears constantly as a generic almanac reference
+    # ("students of Grade IV-V...")
+    "student", "students",
+    # attendance-related - "attendance policy"/"attendance requirement" is
+    # genuine almanac content, not only a personal record lookup
+    "attendance", "present", "presence", "absent", "absentee",
+    # fee-related - "fee structure"/"fees" appears in general almanac
+    # policy content, not only a personal balance lookup
+    "fee", "fees", "due", "dues",
+    # identity-related - "name"/"who" are extremely common words that say
+    # nothing about personal vs. general on their own
+    "name", "who", "where",
+    # generic temporal/availability words - "next", "current", "free" etc.
+    # show up in countless general sentences ("next holiday", "current
+    # academic year", "free dress day")
+    "next", "now", "current", "free", "available",
+    "remaining", "left", "pending",
+}
+
+# Words that ARE ambiguous in isolation as English words, but were checked
+# and NOT flagged, because their existing phrase lists (or the specific
+# intent they belong to) already make a bare match safe enough in practice:
+#   - "roll" (roll_number) - "roll number" is school-record-specific
+#     terminology; no plausible almanac sentence uses it generically.
+#   - "bunk"/"bunked" (attendance) - informal student slang, not almanac
+#     phrasing.
+#   - "breakdown"/"classwise" (class_wise_count) - not ambiguous; kept off
+#     the list deliberately (note: "classwise" bare could theoretically
+#     collide, but it's rare enough in real almanac prose that it's left
+#     alone rather than over-tightened).
+#   - "occupant" (classroom_occupant) - not a real English word almanac
+#     content would use.
+#   - "assigned" (classes_assigned) - not almanac phrasing.
+#   - "location" (teacher_location) - not almanac phrasing (the almanac has
+#     no building/room content).
+#   - "unpaid" (pending_fees_count) - specific enough to fee defaulting,
+#     not general almanac prose.
+
+
+# Bare personal-reference signal words - deliberately small and separate
+# from app.py's PERSONAL_SIGNALS (which also carries bespoke ROUTING
+# phrases like "roll no" that don't belong in a generic "is this worded in
+# the first person" check). tokenize() already strips "my"/"i"/"me"/"mine"
+# as stopwords before scoring, so this checks the CLEANED question string
+# directly, as whole words - not the token list.
+_PERSONAL_SIGNAL_RE = re.compile(r"\b(my|i|me|mine)\b")
+
+
+def has_personal_signal(cleaned_question):
+    """True if the question refers to the asker in the first person."""
+    return bool(_PERSONAL_SIGNAL_RE.search(cleaned_question))
+
+
 def clean_question(question):
     """Lowercase, expand contractions, strip punctuation.
 
@@ -224,26 +318,69 @@ def tokenize(question):
     return [w for w in words if w not in STOPWORDS]
 
 
-def score_intent(cleaned_question, words, intent_name):
+def score_intent(cleaned_question, words, intent_name, personal_signal):
     """Return a score for how well the question matches one intent.
     Higher score = stronger match. Phrase matches count more than
-    single-word matches, since phrases are more specific/reliable."""
+    single-word matches, since phrases are more specific/reliable.
+
+    personal_signal: whether the question refers to the asker in the first
+    person (see has_personal_signal()). A bare match on an AMBIGUOUS_KEYWORDS
+    word with no phrase match and no personal_signal is NOT awarded a point -
+    that combination is exactly the "teachers day"/"exam schedule" failure
+    mode: a single common word that also belongs to a real personal-data
+    intent, with nothing else backing up the guess. Non-ambiguous keywords
+    are unaffected and still score normally on their own, same as before.
+    """
     data = INTENT_DATA[intent_name]
     score = 0
 
     # Phrase matches (checked against the whole cleaned question, not
-    # word by word) - these are strong signals, worth more points
+    # word by word) - these are strong signals, worth more points, and
+    # always count regardless of personal_signal.
+    phrase_matched = False
     for phrase in data["phrases"]:
         if phrase in cleaned_question:
             score += 3
+            phrase_matched = True
 
     # Single word matches, with fuzzy typo tolerance
     for word in words:
         close = difflib.get_close_matches(word, data["keywords"], n=1, cutoff=0.75)
-        if close:
-            score += 1
+        if not close:
+            continue
+        matched_keyword = close[0]
+        if matched_keyword in AMBIGUOUS_KEYWORDS and not phrase_matched and not personal_signal:
+            continue
+        score += 1
 
     return score
+
+
+def detect_intent_with_score(question, possible_intents, confidence_threshold=1):
+    """
+    Same matching as detect_intent(), but also returns the winning score -
+    used by app.py's routing to tell a phrase-backed match (score >= 3) apart
+    from a weak, keyword-only match (score 1-2) when deciding whether to
+    double-check against the almanac before trusting NLP over Gemini.
+
+    Returns (intent_name_or_None, best_score).
+    """
+    cleaned = clean_question(question)
+    words = tokenize(cleaned)
+    personal_signal = has_personal_signal(cleaned)
+
+    best_intent = None
+    best_score = 0
+
+    for intent_name in possible_intents:
+        score = score_intent(cleaned, words, intent_name, personal_signal)
+        if score > best_score:
+            best_score = score
+            best_intent = intent_name
+
+    if best_score >= confidence_threshold:
+        return best_intent, best_score
+    return None, best_score
 
 
 def detect_intent(question, possible_intents, confidence_threshold=1):
@@ -256,18 +393,5 @@ def detect_intent(question, possible_intents, confidence_threshold=1):
     Raise this if the bot seems to guess wrong too often; lower it
     if it seems too hesitant to answer.
     """
-    cleaned = clean_question(question)
-    words = tokenize(cleaned)
-
-    best_intent = None
-    best_score = 0
-
-    for intent_name in possible_intents:
-        score = score_intent(cleaned, words, intent_name)
-        if score > best_score:
-            best_score = score
-            best_intent = intent_name
-
-    if best_score >= confidence_threshold:
-        return best_intent
-    return None
+    intent, _ = detect_intent_with_score(question, possible_intents, confidence_threshold)
+    return intent

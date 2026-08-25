@@ -35,30 +35,32 @@ def load_almanac(path='school_almanac.txt'):
 ALMANAC = load_almanac()
 
 
-def search_almanac(question):
+def _score_almanac_sections(question):
     """
-    Find the most relevant sections of the almanac for this question.
-    Scores each section by how many question words appear in it.
-    Returns the top 3 most relevant sections joined together, or '' if
-    nothing scores.
+    Score every almanac section against a question by how many question
+    words appear in it. Shared scoring core behind both search_almanac()
+    (the Gemini lane's context lookup) and almanac_top_score() (app.py's
+    NLP-vs-Gemini routing tie-break) - one algorithm, two callers, so a
+    future tweak to the matching rules can't drift between them.
 
-    Returning '' (not an arbitrary slice of the almanac) matters: it lets
-    ask_gemini() take its existing "no context -> don't call the API" path
-    for genuinely unrelated questions instead of handing Gemini 2000
-    irrelevant characters and spending a quota-limited API call asking it
-    to guess anyway.
+    Returns a list of (score, section) tuples, highest score first. Empty
+    list if the almanac is missing or nothing scores.
 
-    Two robustness fixes here, both found from a real query that failed in
-    production ("when is SharkTank for 11 and 12th?" against an almanac
-    entry written as "Shark Tank"):
+    Three robustness fixes here, all found from real queries that failed:
     - Strips trailing punctuation from question words before matching, so
       "12th?" matches "12th" instead of failing on the leftover "?".
     - Also checks a whitespace-stripped copy of each section, so a
       squished-together word like "sharktank" still matches an almanac
       entry written as two separate words ("Shark Tank").
+    - Also strips apostrophes from both sides before matching, so "when is
+      teachers day" (how anyone actually types it) matches an almanac
+      section written with the grammatically-correct possessive
+      "Teacher's Day" - "teachers" and "teacher's" don't share a substring
+      otherwise (the apostrophe sits between "teacher" and "s"), which was
+      silently starving this exact section of its rightful match score.
     """
     if not ALMANAC:
-        return ''
+        return []
 
     # Split into sections by double newline
     sections = [s.strip() for s in ALMANAC.split('\n\n') if s.strip()]
@@ -71,11 +73,12 @@ def search_almanac(question):
     cleaned_question = question.lower()
     for ch in '?!.,':
         cleaned_question = cleaned_question.replace(ch, '')
+    cleaned_question = cleaned_question.replace("'", "").replace("’", "")
     question_words = set(cleaned_question.split()) - stopwords
 
     scored = []
     for section in sections:
-        section_lower = section.lower()
+        section_lower = section.lower().replace("'", "").replace("’", "")
         section_squished = re.sub(r'\s+', '', section_lower)
         score = sum(
             1 for word in question_words
@@ -84,9 +87,42 @@ def search_almanac(question):
         if score > 0:
             scored.append((score, section))
 
-    scored.sort(reverse=True)
+    scored.sort(reverse=True, key=lambda pair: pair[0])
+    return scored
+
+
+def search_almanac(question):
+    """
+    Find the most relevant sections of the almanac for this question.
+    Returns the top 3 most relevant sections joined together, or '' if
+    nothing scores.
+
+    Returning '' (not an arbitrary slice of the almanac) matters: it lets
+    ask_gemini() take its existing "no context -> don't call the API" path
+    for genuinely unrelated questions instead of handing Gemini 2000
+    irrelevant characters and spending a quota-limited API call asking it
+    to guess anyway.
+    """
+    scored = _score_almanac_sections(question)
     top = [section for _, section in scored[:3]]
     return '\n\n'.join(top)
+
+
+def almanac_top_score(question):
+    """
+    The single highest section score for this question - a rough measure of
+    "how strongly does real almanac content match this question", used by
+    app.py's use_nlp_lane() as a second signal before trusting a weak NLP
+    intent match. Returns 0 if nothing matches or the almanac is empty.
+
+    This is what makes a NEW event added to school_almanac.txt later
+    (a future "Founders' Day", "Alumni Meet", whatever) automatically
+    protected against being misrouted to NLP, with no code change here -
+    it's scored the same generic way as everything else in the file, not
+    matched against a hand-maintained list of known event names.
+    """
+    scored = _score_almanac_sections(question)
+    return scored[0][0] if scored else 0
 
 
 # The two fallback messages used whenever Gemini can't (or shouldn't) answer.
