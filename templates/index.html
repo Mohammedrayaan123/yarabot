@@ -57,12 +57,35 @@
             --bot-size-login:   140px;  /* big mascot on the login page   */
             --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
             --bot-size-chat:     94px;  /* avatar beside each bot message */
+
+            /* Decorative chameleon, perched on the sidebar's top edge -
+               own knob, smaller on mobile via the @media block below (same
+               767px cutoff as everything else there). */
+            --chameleon-size-sidebar: 86px;
         }
 
         /* Mascot containers - sized from the variables above */
         .bot-lottie-login   { width: var(--bot-size-login);   height: var(--bot-size-login); }
         .bot-lottie-sidebar { width: var(--bot-size-sidebar); height: var(--bot-size-sidebar); }
         .bot-lottie-chat    { width: var(--bot-size-chat);    height: var(--bot-size-chat); }
+
+        /* Decorative only: purely visual, carries no information, so it's
+           taken out of both interaction (pointer-events) and the
+           accessibility tree (aria-hidden, set in the HTML) entirely.
+           Perched at the top-left corner (not top-right, to stay clear of
+           #sidebar-close-btn which lives there on mobile) so it can never
+           overlap a real control. */
+        .chameleon-perch {
+            position: absolute;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .chameleon-perch-sidebar {
+            width: var(--chameleon-size-sidebar);
+            height: var(--chameleon-size-sidebar);
+            top:  18px;
+            left: 205px;
+        }
 
         /* Scrollbar styling */
         ::-webkit-scrollbar { width: 5px; }
@@ -187,8 +210,12 @@
             to { transform: rotate(360deg); }
         }
 
-        /* Hide scrollbar on sidebar but keep scroll */
-        #sidebar::-webkit-scrollbar { display: none; }
+        /* Hide scrollbar on sidebar but keep scroll. Lives on #sidebar-scroll
+           (the inner wrapper), not #sidebar itself - #sidebar stopped being
+           the scrolling element when overflow-y-auto moved to that inner
+           wrapper, so #sidebar-chameleon could perch on the sidebar's top
+           edge without being clipped by the scroll container's overflow. */
+        #sidebar-scroll::-webkit-scrollbar { display: none; }
 
         /* ---- Collapsible sidebar (mobile/tablet, below the 768px `md` breakpoint) ----
            #sidebar is `fixed` + `-translate-x-full` (off-screen left) by default on
@@ -265,6 +292,14 @@
                 border-radius: 22px;
                 border-color: transparent;
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+            }
+
+            /* Decorative chameleon: smaller on mobile than desktop, same
+               reasoning as every other size knob on this page - a mobile
+               screen has much less room to spare on a purely decorative
+               accent. */
+            :root {
+                --chameleon-size-sidebar: 40px;
             }
         }
 
@@ -375,9 +410,20 @@
     <h1 class="sr-only">YaraBot chat</h1>
 
     <!-- SIDEBAR -->
+    <!-- No overflow-y-auto here anymore (moved to #sidebar-scroll below) -
+         #sidebar itself needs to stay overflow-visible so #sidebar-chameleon
+         can perch on its top edge without being clipped. -->
     <div id="sidebar" class="fixed md:static inset-y-0 left-0 z-40 w-72 h-full bg-gray-50 border-r border-gray-100
-                              flex flex-col overflow-y-auto flex-shrink-0
+                              flex flex-col flex-shrink-0
                               -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out">
+
+        <!-- Decorative only - perched/gripping the sidebar's top edge, at
+             the top-LEFT corner deliberately: top-right is where
+             #sidebar-close-btn lives on mobile, and this must never be able
+             to overlap a real control. aria-hidden + pointer-events:none
+             (see .chameleon-perch): carries no information and must never
+             intercept a tap. -->
+        <div id="sidebar-chameleon" class="chameleon-perch chameleon-perch-sidebar" aria-hidden="true"></div>
 
         <!-- Close button - mobile/tablet only, hidden entirely on desktop since the
              sidebar is permanent there and never needs closing. -->
@@ -392,6 +438,12 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
         </button>
+
+        <!-- Scrollable content - see the #sidebar comment above for why
+             overflow-y-auto lives here instead of on #sidebar itself.
+             min-h-0 is required on a flex child for overflow-y-auto to
+             actually scroll instead of growing past its allotted space. -->
+        <div id="sidebar-scroll" class="flex-1 min-h-0 overflow-y-auto flex flex-col">
 
         <!-- School header: Lottie mascot | wordmark. No school logo here
              (deliberately - kept everywhere else it's used, e.g. the login
@@ -443,6 +495,7 @@
                     Sign Out
                 </button>
             </div>
+        </div>
         </div>
     </div>
 

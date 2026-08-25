@@ -21,40 +21,53 @@ let sessionExpiredHandled = false;
 
 
 // =========================================================
-// LOTTIE BOT ANIMATIONS
-// The mascot JSON is ~180KB, so we fetch and parse it ONCE and reuse the
-// parsed object for every instance (passing `animationData`). Loading it
-// per-bubble via `path` would re-parse the whole file for every message.
+// LOTTIE ANIMATIONS
+// Each JSON is fetched and parsed ONCE per URL and the parsed object reused
+// for every instance of that animation (passing `animationData`). Loading
+// per-bubble via `path` would re-parse the whole file every time.
 // =========================================================
 const BOT_LOTTIE_URL = "/static/chatbot.json";
-let botLottieData = null;          // cached parsed JSON
-let botLottieLoading = null;       // in-flight fetch, so we only request once
-let lottieInstances = [];          // kept so we can destroy them on clearChat()
+// Decorative chameleon mascot (sidebar + login card, perched on the top
+// edge). Inspected before wiring in: contains a leftover embedded
+// "nwsys.png" image layer and a "by <creator>" text credit layer from its
+// original source, but NEITHER ever renders in ANY frame of the loop -
+// confirmed by stepping through all 140 frames in lottie-web itself. The
+// image layer's ip/op (in/out point) are equal, i.e. zero duration, so
+// lottie-web keeps its group `display:none` for the entire animation. The
+// text layer's actual string content is empty (""), the only text layer
+// anywhere in the file including nested comps, so it draws nothing
+// regardless of its keyframed opacity. No stripping needed - verified
+// empirically, not just by reading the JSON.
+const CHAMELEON_LOTTIE_URL = "/static/Camaleon.json";
+const _lottieDataCache = {};      // url -> cached parsed JSON
+const _lottieLoadingCache = {};   // url -> in-flight fetch, so each url is only requested once
+let lottieInstances = [];         // kept so we can destroy them on clearChat()
 let lottieIdCounter = 0;
 
-function loadBotLottieData() {
-    if (botLottieData) return Promise.resolve(botLottieData);
-    if (botLottieLoading) return botLottieLoading;
+function loadLottieData(url) {
+    if (_lottieDataCache[url]) return Promise.resolve(_lottieDataCache[url]);
+    if (_lottieLoadingCache[url]) return _lottieLoadingCache[url];
 
-    botLottieLoading = fetch(BOT_LOTTIE_URL)
+    _lottieLoadingCache[url] = fetch(url)
         .then(res => res.json())
         .then(data => {
-            botLottieData = data;
+            _lottieDataCache[url] = data;
             return data;
         })
         .catch(() => null);   // animation is decorative - never break the UI over it
 
-    return botLottieLoading;
+    return _lottieLoadingCache[url];
 }
 
 /**
- * Mount the bot mascot into a container element.
+ * Mount a Lottie animation into a container element. Defaults to the bot
+ * mascot; pass CHAMELEON_LOTTIE_URL (or any other URL) for a different one.
  * Safe to call before the JSON has downloaded - it waits, then renders.
  */
-function mountBotLottie(container) {
+function mountBotLottie(container, url = BOT_LOTTIE_URL) {
     if (!container || typeof lottie === "undefined") return;
 
-    loadBotLottieData().then(data => {
+    loadLottieData(url).then(data => {
         if (!data || !container.isConnected) return;
         const anim = lottie.loadAnimation({
             container: container,
@@ -284,6 +297,12 @@ function showChatPage(profile) {
     const sidebarLottie = document.getElementById("sidebar-lottie");
     if (sidebarLottie && !sidebarLottie.hasChildNodes()) {
         mountBotLottie(sidebarLottie);
+    }
+    // Decorative chameleon, perched on the sidebar's top edge - same
+    // "mount once" guard as the sidebar mascot above.
+    const sidebarChameleon = document.getElementById("sidebar-chameleon");
+    if (sidebarChameleon && !sidebarChameleon.hasChildNodes()) {
+        mountBotLottie(sidebarChameleon, CHAMELEON_LOTTIE_URL);
     }
 
     // Set greeting
