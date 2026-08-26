@@ -58,10 +58,27 @@
             --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
             --bot-size-chat:     64px;  /* avatar beside each bot message */
 
-            /* Decorative chameleon, perched on the sidebar's top edge -
-               own knob, smaller on mobile via the @media block below (same
-               767px cutoff as everything else there). */
-            --chameleon-size-sidebar: 86px;
+            /* Decorative chameleon, perched on the sidebar's top edge, near
+               the ID card's top-right corner / gold star. Position AND
+               size are independently tunable per breakpoint (desktop vs.
+               mobile, same 767px cutoff as everything else on this page) -
+               six knobs total, so a change to one never forces a
+               compensating change to another. The desktop values below are
+               the base/default; the mobile @media block further down
+               overrides all three -mobile counterparts onto the actual
+               .chameleon-perch-sidebar properties. Mobile starting values
+               were picked to scale the offsets down proportionally with the
+               size (86px -> 40px is ~2.15x smaller, so -20px/-10px ->
+               roughly -9px/-5px keeps the same "how far it hangs off the
+               corner relative to its own size" look) - a starting point,
+               expected to need visual fine-tuning. */
+            --chameleon-size-sidebar-desktop: 86px;
+            --chameleon-offset-top-desktop: -70px;
+            --chameleon-offset-right-desktop: -26px;
+
+            --chameleon-size-sidebar-mobile: 85px;
+            --chameleon-offset-top-mobile: -49px;
+            --chameleon-offset-right-mobile: -26px;
         }
 
         /* Mascot containers - sized from the variables above */
@@ -79,17 +96,16 @@
         }
         /* Anchored to the ID card's own wrapper (a sibling, see the HTML
            comment by #sidebar-chameleon), not #sidebar - top/right offsets
-           here are relative to the CARD, so this is the only place that
-           needs tuning, and it's correct at every screen size automatically
-           (only the SIZE changes on mobile, via --chameleon-size-sidebar in
-           the @media block below - not this placement). Perched at the
-           top-RIGHT corner, near the gold star, well below the header row -
-           nowhere near #sidebar-close-btn regardless of viewport width. */
+           here are relative to the CARD. Perched at the top-RIGHT corner,
+           near the gold star, well below the header row - nowhere near
+           #sidebar-close-btn regardless of viewport width. Desktop values
+           by default; overridden per-property (not just the size) inside
+           the @media block below on mobile. */
         .chameleon-perch-sidebar {
-            width: var(--chameleon-size-sidebar);
-            height: var(--chameleon-size-sidebar);
-            top: -20px;
-            right: -10px;
+            width: var(--chameleon-size-sidebar-desktop);
+            height: var(--chameleon-size-sidebar-desktop);
+            top: var(--chameleon-offset-top-desktop);
+            right: var(--chameleon-offset-right-desktop);
         }
 
         /* Scrollbar styling */
@@ -299,12 +315,17 @@
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
             }
 
-            /* Decorative chameleon: smaller on mobile than desktop, same
-               reasoning as every other size knob on this page - a mobile
-               screen has much less room to spare on a purely decorative
-               accent. */
-            :root {
-                --chameleon-size-sidebar: 40px;
+            /* Decorative chameleon: independently-tunable position AND
+               size on mobile, not just a smaller size at the same relative
+               offset - see the --chameleon-*-desktop/-mobile variables
+               near the top of this file for the actual values. Overriding
+               the properties directly (not the desktop variables) so the
+               two breakpoints can never accidentally affect each other. */
+            .chameleon-perch-sidebar {
+                width: var(--chameleon-size-sidebar-mobile);
+                height: var(--chameleon-size-sidebar-mobile);
+                top: var(--chameleon-offset-top-mobile);
+                right: var(--chameleon-offset-right-mobile);
             }
         }
 
