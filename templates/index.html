@@ -56,7 +56,7 @@
                and every instance of that type resizes. */
             --bot-size-login:   140px;  /* big mascot on the login page   */
             --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
-            --bot-size-chat:     94px;  /* avatar beside each bot message */
+            --bot-size-chat:     64px;  /* avatar beside each bot message */
 
             /* Decorative chameleon, perched on the sidebar's top edge -
                own knob, smaller on mobile via the @media block below (same
@@ -71,20 +71,25 @@
 
         /* Decorative only: purely visual, carries no information, so it's
            taken out of both interaction (pointer-events) and the
-           accessibility tree (aria-hidden, set in the HTML) entirely.
-           Perched at the top-left corner (not top-right, to stay clear of
-           #sidebar-close-btn which lives there on mobile) so it can never
-           overlap a real control. */
+           accessibility tree (aria-hidden, set in the HTML) entirely. */
         .chameleon-perch {
             position: absolute;
             pointer-events: none;
             z-index: 5;
         }
+        /* Anchored to the ID card's own wrapper (a sibling, see the HTML
+           comment by #sidebar-chameleon), not #sidebar - top/right offsets
+           here are relative to the CARD, so this is the only place that
+           needs tuning, and it's correct at every screen size automatically
+           (only the SIZE changes on mobile, via --chameleon-size-sidebar in
+           the @media block below - not this placement). Perched at the
+           top-RIGHT corner, near the gold star, well below the header row -
+           nowhere near #sidebar-close-btn regardless of viewport width. */
         .chameleon-perch-sidebar {
             width: var(--chameleon-size-sidebar);
             height: var(--chameleon-size-sidebar);
-            top:  18px;
-            left: 205px;
+            top: -20px;
+            right: -10px;
         }
 
         /* Scrollbar styling */
@@ -411,19 +416,11 @@
 
     <!-- SIDEBAR -->
     <!-- No overflow-y-auto here anymore (moved to #sidebar-scroll below) -
-         #sidebar itself needs to stay overflow-visible so #sidebar-chameleon
-         can perch on its top edge without being clipped. -->
+         #sidebar itself needs to stay overflow-visible so nothing inside
+         gets clipped by it. -->
     <div id="sidebar" class="fixed md:static inset-y-0 left-0 z-40 w-72 h-full bg-gray-50 border-r border-gray-100
                               flex flex-col flex-shrink-0
                               -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out">
-
-        <!-- Decorative only - perched/gripping the sidebar's top edge, at
-             the top-LEFT corner deliberately: top-right is where
-             #sidebar-close-btn lives on mobile, and this must never be able
-             to overlap a real control. aria-hidden + pointer-events:none
-             (see .chameleon-perch): carries no information and must never
-             intercept a tap. -->
-        <div id="sidebar-chameleon" class="chameleon-perch chameleon-perch-sidebar" aria-hidden="true"></div>
 
         <!-- Close button - mobile/tablet only, hidden entirely on desktop since the
              sidebar is permanent there and never needs closing. -->
@@ -455,9 +452,31 @@
                 <span class="font-quicksand text-gray-800 text-2xl">YaraBot</span>
             </div>
 
-            <!-- ID Card -->
-            <div id="id-card" class="id-card rounded-2xl p-5 text-white shadow-lg mb-5">
-                <span class="id-card-star">⭐</span>
+            <!-- ID Card wrapper - relatively positioned, no overflow
+                 clipping, so #sidebar-chameleon (a SIBLING of #id-card, not
+                 a child of it) can perch over the card's top-right corner
+                 without being clipped by #id-card's own overflow:hidden
+                 (needed there for the gold star decoration). Same "move
+                 the overflow elsewhere" fix as #sidebar-scroll above -
+                 anchoring the chameleon to #sidebar instead of #id-card
+                 directly used to make it drift: #sidebar becomes
+                 position:static on desktop (md:static), so an absolutely
+                 positioned child of it was actually escaping all the way up
+                 to the page root and only coincidentally lining up near the
+                 card (since the sidebar sits flush at the viewport's
+                 top-left corner) - and on mobile its fixed pixel offsets
+                 genuinely overlapped #sidebar-close-btn. Anchoring directly
+                 to the card fixes both: no ambiguous positioning context,
+                 and nowhere near the close button regardless of screen
+                 size, since the card sits well below the header row. -->
+            <div class="relative">
+                <!-- Decorative only - perched/gripping the card's top-right
+                     corner, near the gold star. aria-hidden +
+                     pointer-events:none (see .chameleon-perch): carries no
+                     information and must never intercept a tap. -->
+                <div id="sidebar-chameleon" class="chameleon-perch chameleon-perch-sidebar" aria-hidden="true"></div>
+                <div id="id-card" class="id-card rounded-2xl p-5 text-white shadow-lg mb-5">
+                    <span class="id-card-star">⭐</span>
                 <div class="text-xs font-semibold tracking-widest uppercase opacity-75 mb-3">
                     Student ID
                 </div>
@@ -465,6 +484,7 @@
                 <div id="card-sub" class="text-xs opacity-80 mb-4">—</div>
                 <div class="flex gap-2" id="card-stats">
                     <!-- Stats injected by JS -->
+                </div>
                 </div>
             </div>
 
@@ -530,7 +550,22 @@
         </div>
 
         <!-- Chat messages -->
-        <div id="chat-messages" class="flex-1 overflow-y-auto px-6 py-6 space-y-4">
+        <!-- tabindex="0": axe-core's scrollable-region-focusable flags this
+             once there are enough messages to actually overflow (a keyboard
+             user needs to be able to Tab to a scrollable region and use
+             arrow keys to scroll it - it wasn't reachable at all before).
+             Set unconditionally rather than only once content overflows:
+             toggling tabindex in and out of the tab order as messages
+             arrive would be much more confusing for a keyboard user than a
+             harmless, non-scrolling focus stop is when the log is still
+             short. role="region" + aria-label names the landmark for
+             screen readers - deliberately NOT role="log" (which implies
+             aria-live="polite" per the ARIA spec): the Gemini lane
+             streams a reply into a bubble incrementally, chunk by chunk,
+             and a live region would try to announce every partial re-render
+             as the text grows, which would be unusably noisy rather than
+             helpful. -->
+        <div id="chat-messages" tabindex="0" role="region" aria-label="Chat messages" class="flex-1 overflow-y-auto px-6 py-6 space-y-4">
 
             <!-- Greeting (shown before first message) -->
             <div id="greeting" class="flex flex-col items-center justify-center h-full text-center pb-20">

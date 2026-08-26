@@ -44,6 +44,24 @@ const _lottieLoadingCache = {};   // url -> in-flight fetch, so each url is only
 let lottieInstances = [];         // kept so we can destroy them on clearChat()
 let lottieIdCounter = 0;
 
+// chatbot.json's character only occupies a fraction of its native 500x500
+// canvas - measured empirically (every frame of the 150-frame idle loop,
+// via each shape's rendered bounding box mapped back into viewBox units):
+// the character's own shapes span roughly x:169-320, y:94-452 throughout
+// the whole loop, i.e. only ~30% of the canvas width and ~72% of its
+// height, leaving a lot of dead space that made the mascot look tiny
+// inside its box. Cropping the rendered SVG's viewBox to a square centered
+// on the character - sized to fully contain that whole measured motion
+// envelope plus a margin, so the idle bounce never gets clipped - fixes
+// that without needing a bigger container. Deliberately does NOT apply to
+// Camaleon.json: measured the same way, its "envelope" actually extends
+// PAST its own 1080x1080 canvas (a small fly + leaf accent are legitimately
+// off-canvas by design) - it doesn't have a padding problem, and cropping
+// it the same way would clip real artwork instead of empty space.
+const LOTTIE_VIEWBOX_CROPS = {
+    [BOT_LOTTIE_URL]: "45 73 400 400",
+};
+
 function loadLottieData(url) {
     if (_lottieDataCache[url]) return Promise.resolve(_lottieDataCache[url]);
     if (_lottieLoadingCache[url]) return _lottieLoadingCache[url];
@@ -74,8 +92,28 @@ function mountBotLottie(container, url = BOT_LOTTIE_URL) {
             renderer: "svg",
             loop: true,
             autoplay: true,
-            animationData: data
+            animationData: data,
+            rendererSettings: {
+                // Container and viewBox are both square for every mascot
+                // instance, so meet vs. slice makes no visual difference on
+                // its own here - the real fix for the "tiny character,
+                // excess padding" complaint is the viewBox crop just below.
+                // Set anyway (harmless, and correct default going forward
+                // for any non-square case added later).
+                preserveAspectRatio: "xMidYMid slice"
+            }
         });
+
+        // See LOTTIE_VIEWBOX_CROPS above. lottie-web has no loadAnimation()
+        // option for a custom crop rectangle, so this just overwrites the
+        // viewBox attribute it already set (normally "0 0 <w> <h>", the
+        // animation's full native canvas) after mounting.
+        const crop = LOTTIE_VIEWBOX_CROPS[url];
+        if (crop) {
+            const svg = container.querySelector("svg");
+            if (svg) svg.setAttribute("viewBox", crop);
+        }
+
         lottieInstances.push({ anim, container });
     });
 }
