@@ -97,13 +97,26 @@ GENERAL_KNOWLEDGE_SIGNALS = [
     "admission", "admissions",
     "fee structure", "fees structure", "school fee",
     "uniform", "dress code",
-    "policy", "policies", "circular", "notice board", "announcement",
+    "policy", "policies", "circular", "notice board",
     "academic calendar", "academic year",
     "cbse",
     "school reopen", "school reopens", "school start", "school begins",
     "school hours", "school timing", "office hours",
     "transport", "bus route",
 ]
+# "announcement" USED to be in this list, back when it protected nothing in
+# particular (school_almanac.txt has zero occurrences of "notice" or
+# "announcement" anywhere in it). Now that a real `notices` NLP intent
+# exists (nlp_helpers.py, backed by the new `notices` MySQL table), that
+# stale entry would have shadowed it completely - this list is checked
+# BEFORE detect_intent_with_score() ever runs, for every role, so a student
+# asking "any announcements" would have been forced to the Gemini/almanac
+# lane and gotten "I don't have that information" instead of their actual
+# notices. Removed rather than special-cased: nothing in the almanac
+# legitimately needs it, and the almanac_top_score() tie-break further down
+# in use_nlp_lane() already exists as the self-maintaining safety net for
+# the (currently nonexistent) case where a future almanac edit genuinely
+# does use the word "announcement".
 
 
 def is_general_knowledge_question(question):
@@ -160,14 +173,16 @@ def is_pure_greeting(question):
 # from pronouns.
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
-                "roll_number", "my_class", "next_period", "subject_teacher"],
+                "roll_number", "my_class", "next_period", "subject_teacher",
+                "notices"],
     "teacher": ["period_count", "timetable", "classes_assigned", "next_class",
-                "current_class", "free_periods", "periods_remaining", "teacher_identity"],
+                "current_class", "free_periods", "periods_remaining", "teacher_identity",
+                "notices"],
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
                   "class_wise_count", "teacher_location", "classroom_occupant",
                   "free_teachers", "teacher_schedule_lookup",
                   "school_wide_subject_teacher", "low_attendance_count",
-                  "pending_fees_count"],
+                  "pending_fees_count", "notices"],
 }
 
 
@@ -782,6 +797,30 @@ def _known_subject_names():
 
 
 # =========================================================
+# NLP EXPANSION — shared across all three roles
+# Notices aren't personal to any one student/teacher, and they're not
+# principal-only school stats either - every role sees the same list, so
+# unlike every other handler in this file there's no role-specific ID to
+# branch on. This is the only handler called verbatim from all three of
+# answer_student()/answer_teacher()/answer_principal() below.
+# =========================================================
+def handle_notices():
+    """Returns the most recent notices posted via the dashboard, newest
+    first, capped at 5 so a long history doesn't flood the chat."""
+    results = query(
+        """SELECT title, body, date_posted FROM notices
+           ORDER BY date_posted DESC, notice_id DESC LIMIT 5""",
+        fetch=True, many=True
+    )
+
+    if not results:
+        return "No notices posted at the moment."
+
+    lines = [f"**{title}** ({date_posted})\n{body}" for title, body, date_posted in results]
+    return "📢 Latest notices:\n\n" + "\n\n".join(lines)
+
+
+# =========================================================
 # NLP EXPANSION — student handlers
 # =========================================================
 def handle_identity(student_id):
@@ -1274,7 +1313,8 @@ def answer_student(question, student_id):
     intent = detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
-         "identity", "roll_number", "my_class", "next_period", "subject_teacher"]
+         "identity", "roll_number", "my_class", "next_period", "subject_teacher",
+         "notices"]
     )
 
     if intent == "greeting":
@@ -1289,7 +1329,8 @@ def answer_student(question, student_id):
                 "💰 **Fees** — *'is my fee paid'*\n"
                 "🙋 **My details** — *'who am i'*, *'my roll number'*, *'what class am i in'*\n"
                 "⏭ **Next period** — *'what's my next period'*\n"
-                "👩‍🏫 **Subject teacher** — *'who teaches me math'*")
+                "👩‍🏫 **Subject teacher** — *'who teaches me math'*\n"
+                "📢 **Notices** — *'any announcements'*")
 
     if intent == "attendance":
         result = query(
@@ -1335,6 +1376,9 @@ def answer_student(question, student_id):
         known_subjects = _known_subject_names()
         return handle_subject_teacher(question, student_id, known_subjects)
 
+    elif intent == "notices":
+        return handle_notices()
+
     return ("I didn't quite get that. Try asking about:\n"
             "**attendance**, **exams**, **timetable**, **fees**, or your **details**.")
 
@@ -1343,7 +1387,8 @@ def answer_teacher(question, teacher_id):
     intent = detect_intent(
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
-         "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity"]
+         "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
+         "notices"]
     )
 
     if intent == "greeting":
@@ -1358,7 +1403,8 @@ def answer_teacher(question, teacher_id):
                 "⏭ **Next/current class** — *'what am I teaching next'*, *'what am I teaching now'*\n"
                 "🆓 **Free periods** — *'am I free right now'*, *'free periods today'*\n"
                 "⏳ **Periods left today** — *'how many periods do I have left'*\n"
-                "🙋 **My details** — *'who am i'*")
+                "🙋 **My details** — *'who am i'*\n"
+                "📢 **Notices** — *'any announcements'*")
 
     if intent == "period_count":
         # period_count's own phrase list includes "periods today" - without
@@ -1411,6 +1457,9 @@ def answer_teacher(question, teacher_id):
     elif intent == "teacher_identity":
         return handle_teacher_identity(teacher_id)
 
+    elif intent == "notices":
+        return handle_notices()
+
     return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
 
 
@@ -1430,7 +1479,7 @@ def answer_principal(question):
          "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
          "teacher_location", "classroom_occupant", "free_teachers",
          "teacher_schedule_lookup", "school_wide_subject_teacher",
-         "low_attendance_count", "pending_fees_count"]
+         "low_attendance_count", "pending_fees_count", "notices"]
     )
 
     if intent == "greeting":
@@ -1448,7 +1497,8 @@ def answer_principal(question):
                 "🗓 **A teacher's schedule** — *'schedule for <name>'*\n"
                 "👩‍🏫 **Subject teachers** — *'who teaches math'*\n"
                 "⚠️ **Attendance risk** — *'students with low attendance'*\n"
-                "💰 **Pending fees** — *'pending fees'*")
+                "💰 **Pending fees** — *'pending fees'*\n"
+                "📢 **Notices** — *'any announcements'*")
 
     if intent == "total_students":
         result = query("SELECT COUNT(*) FROM students", fetch=True)
@@ -1495,6 +1545,9 @@ def answer_principal(question):
 
     elif intent == "teacher_count_by_subject":
         return handle_teacher_count_by_subject(question)
+
+    elif intent == "notices":
+        return handle_notices()
 
     return "I didn't understand that. Try asking about **students**, **teachers**, or **class breakdown**."
 

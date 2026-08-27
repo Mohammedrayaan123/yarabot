@@ -194,6 +194,14 @@ INTENT_DATA = {
         "phrases": ["how many teachers teach", "teachers for subject"],
         "keywords": ["teachers"],
     },
+
+    # ---- Shared across all three roles ----
+    "notices": {
+        "phrases": ["latest notices", "any announcements", "school notices",
+                    "any updates", "recent announcements", "any notices",
+                    "any notice", "new notices"],
+        "keywords": ["notice", "notices", "announcement", "announcements"],
+    },
 }
 
 
@@ -256,6 +264,13 @@ AMBIGUOUS_KEYWORDS = {
     "next", "now", "current", "free", "available",
     "remaining", "left", "pending",
 }
+# NOTE (re-audit when the "notices" intent was added): "notice"/"notices"/
+# "announcement"/"announcements" are NOT in the set above. Checked against
+# school_almanac.txt directly - zero occurrences of either word anywhere in
+# it, so there's no almanac content for a bare keyword match to collide
+# with. Unlike "class"/"exam"/etc., notices content lives entirely in the
+# `notices` MySQL table, not the almanac file, so this intent doesn't need
+# the same protection the almanac-sourced intents do.
 
 # Words that ARE ambiguous in isolation as English words, but were checked
 # and NOT flagged, because their existing phrase lists (or the specific

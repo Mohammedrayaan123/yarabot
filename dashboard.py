@@ -19,6 +19,7 @@ To run this file:
 
 import os
 import time
+import datetime
 import streamlit as st
 import mysql.connector
 import pandas as pd
@@ -159,7 +160,8 @@ if st.sidebar.button("Log Out"):
 
 page = st.sidebar.radio(
     "Go to",
-    ["Students", "Teachers", "Subjects", "Timetable", "Exams", "Logins"]
+    ["Students", "Teachers", "Subjects", "Timetable", "Exams", "Logins",
+     "Notices", "Almanac"]
 )
 
 
@@ -995,3 +997,118 @@ elif page == "Logins":
         st.dataframe(user_df, hide_index=True)
     else:
         st.info("No logins created yet.")
+
+
+# =========================================================
+# PAGE: NOTICES
+# Lets non-technical staff post school-wide announcements that show up
+# through the chatbot's "notices" intent for all three roles (student,
+# teacher, principal) - see handle_notices() in app.py for the chatbot
+# side, and the "notices" entry in nlp_helpers.py's INTENT_DATA.
+# =========================================================
+elif page == "Notices":
+    st.title("School Notices / Announcements")
+    st.caption("Post announcements that students, teachers, and the principal can see through the chatbot.")
+
+    st.header("Post New Notice")
+    with st.form("add_notice_form", clear_on_submit=True):
+        notice_title = st.text_input("Title (e.g. 'Sports Day Postponed')")
+        notice_body = st.text_area("Message", height=150)
+        notice_submitted = st.form_submit_button("Post Notice")
+
+        if notice_submitted:
+            if not notice_title.strip() or not notice_body.strip():
+                st.error("⚠️ Please fill in both title and message.")
+            else:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """INSERT INTO notices (title, body, posted_by, date_posted)
+                       VALUES (%s, %s, %s, %s)""",
+                    # posted_by=0: the dashboard admin login is a fixed env-var
+                    # credential, not a row in `users` - there's no real user_id
+                    # to reference here, so 0 is a sentinel for "posted via the
+                    # admin dashboard".
+                    (notice_title.strip(), notice_body.strip(), 0, datetime.date.today())
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                st.success(f"✅ Notice '{notice_title.strip()}' posted successfully!")
+
+    st.header("Current Notices")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT notice_id, title, body, date_posted FROM notices "
+        "ORDER BY date_posted DESC, notice_id DESC"
+    )
+    notices = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not notices:
+        st.info("No notices posted yet.")
+    else:
+        for notice_id, title, body, date_posted in notices:
+            with st.expander(f"{title} — {date_posted}"):
+                st.write(body)
+                if st.button("Delete", key=f"del_notice_{notice_id}"):
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM notices WHERE notice_id=%s", (notice_id,))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.warning(f"'{title}' was deleted.")
+                    st.rerun()
+
+
+# =========================================================
+# PAGE: ALMANAC
+# Self-service editor for school_almanac.txt - the general school
+# knowledge Gemini uses (holidays, PTM dates, policies, etc). Saving here
+# takes effect immediately: gemini_rag.py's get_almanac() auto-reloads the
+# file whenever its last-modified time changes, so there's no need to
+# restart the Flask app after saving.
+# =========================================================
+elif page == "Almanac":
+    st.title("School Almanac / General Information")
+    st.caption(
+        "This is the general school knowledge the AI assistant (Nova) uses to answer "
+        "questions like holidays, PTM dates, admissions, and school policies. "
+        "Edit it here - changes take effect automatically, no restart needed."
+    )
+
+    # Must match gemini_rag.py's ALMANAC_PATH exactly - both dashboard.py
+    # and app.py/gemini_rag.py are run from the project root, so the same
+    # relative filename resolves to the same file for both.
+    almanac_path = "school_almanac.txt"
+
+    try:
+        with open(almanac_path, "r", encoding="utf-8") as f:
+            current_content = f.read()
+    except FileNotFoundError:
+        current_content = ""
+        st.warning("⚠️ No almanac file found yet. Start writing below to create one.")
+
+    with st.form("edit_almanac_form"):
+        new_content = st.text_area(
+            "Almanac content",
+            value=current_content,
+            height=600,
+            help="Keep related information grouped together, separated by a blank line - "
+                 "this helps the AI find the right section when answering a question."
+        )
+        save_clicked = st.form_submit_button("Save Changes")
+
+        if save_clicked:
+            try:
+                with open(almanac_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                st.success("✅ Almanac updated! The chatbot will use the new information immediately - no restart needed.")
+            except Exception as e:
+                st.error(f"⚠️ Could not save: {e}")
+
+    st.divider()
+    st.caption(f"Current file size: {len(current_content)} characters")

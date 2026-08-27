@@ -23,7 +23,6 @@ from google import genai
 from openai import OpenAI
 
 
-# Load almanac once at startup — not on every request
 def load_almanac(path='school_almanac.txt'):
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -32,7 +31,52 @@ def load_almanac(path='school_almanac.txt'):
         return ''
 
 
-ALMANAC = load_almanac()
+# ---------------------------------------------------------------
+# Auto-reloading almanac cache.
+#
+# The dashboard now has a self-service "Almanac" editor (a textarea over
+# this same file) meant for non-technical staff - it has to take effect
+# immediately, since nobody running that page should need to know "someone
+# has to restart the Flask server" is even a step. Re-reading the file on
+# EVERY question would work too, but almanac_top_score() below is called on
+# nearly every chat message (including most NLP-lane ones, as app.py's
+# use_nlp_lane() tie-break), so that would mean a disk read per message for
+# a value that in practice changes a few times a year. Caching by mtime
+# gets the same "always current" behavior for free, at the cost of one
+# cheap os.path.getmtime() stat call per question instead.
+# ---------------------------------------------------------------
+ALMANAC_PATH = 'school_almanac.txt'
+_almanac_cache = {'content': load_almanac(ALMANAC_PATH), 'mtime': None}
+try:
+    _almanac_cache['mtime'] = os.path.getmtime(ALMANAC_PATH)
+except OSError:
+    _almanac_cache['mtime'] = None
+
+
+def get_almanac():
+    """
+    Returns the current almanac text, transparently reloading it from disk
+    whenever the file's last-modified time has changed since the last read.
+    This is the single source of truth _score_almanac_sections() (and
+    therefore search_almanac()/almanac_top_score()) reads from - there's no
+    other module-level almanac constant anywhere else to keep in sync.
+
+    If the file has been deleted out from under a running server, keep
+    serving the last good copy rather than suddenly returning '' - a
+    momentary editor save-in-progress or a bad path shouldn't blank out
+    every general-knowledge answer.
+    """
+    try:
+        current_mtime = os.path.getmtime(ALMANAC_PATH)
+    except OSError:
+        return _almanac_cache['content']
+
+    if current_mtime != _almanac_cache['mtime']:
+        _almanac_cache['content'] = load_almanac(ALMANAC_PATH)
+        _almanac_cache['mtime'] = current_mtime
+        print(f"[ALMANAC RELOADED] {len(_almanac_cache['content'])} chars")
+
+    return _almanac_cache['content']
 
 
 def _score_almanac_sections(question):
@@ -59,11 +103,12 @@ def _score_almanac_sections(question):
       otherwise (the apostrophe sits between "teacher" and "s"), which was
       silently starving this exact section of its rightful match score.
     """
-    if not ALMANAC:
+    almanac = get_almanac()
+    if not almanac:
         return []
 
     # Split into sections by double newline
-    sections = [s.strip() for s in ALMANAC.split('\n\n') if s.strip()]
+    sections = [s.strip() for s in almanac.split('\n\n') if s.strip()]
 
     # Remove common stopwords before scoring
     stopwords = {'what', 'when', 'where', 'how', 'is', 'are', 'the',
