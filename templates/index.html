@@ -58,20 +58,7 @@
             --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
             --bot-size-chat:     64px;  /* avatar beside each bot message */
 
-            /* Decorative chameleon, perched on the sidebar's top edge, near
-               the ID card's top-right corner / gold star. Position AND
-               size are independently tunable per breakpoint (desktop vs.
-               mobile, same 767px cutoff as everything else on this page) -
-               six knobs total, so a change to one never forces a
-               compensating change to another. The desktop values below are
-               the base/default; the mobile @media block further down
-               overrides all three -mobile counterparts onto the actual
-               .chameleon-perch-sidebar properties. Mobile starting values
-               were picked to scale the offsets down proportionally with the
-               size (86px -> 40px is ~2.15x smaller, so -20px/-10px ->
-               roughly -9px/-5px keeps the same "how far it hangs off the
-               corner relative to its own size" look) - a starting point,
-               expected to need visual fine-tuning. */
+            /*Chamel3on */
             --chameleon-size-sidebar-desktop: 86px;
             --chameleon-offset-top-desktop: -70px;
             --chameleon-offset-right-desktop: -26px;
@@ -79,6 +66,21 @@
             --chameleon-size-sidebar-mobile: 85px;
             --chameleon-offset-top-mobile: -49px;
             --chameleon-offset-right-mobile: -26px;
+
+            /*spiderman*/
+            --spiderman-size-desktop: 44px;
+            --spiderman-perch-height-desktop: 73px;
+            
+            --spiderman-drop-distance-desktop: 40px;
+            --spiderman-offset-top-desktop: -8px;
+            --spiderman-offset-left-desktop: 6px;
+
+            --spiderman-size-mobile: 30px;
+            --spiderman-perch-height-mobile: 50px;
+
+            --spiderman-drop-distance-mobile: 46px;
+            --spiderman-offset-top-mobile: -15px;
+            --spiderman-offset-left-mobile: 15px;
         }
 
         /* Mascot containers - sized from the variables above */
@@ -106,6 +108,69 @@
             height: var(--chameleon-size-sidebar-desktop);
             top: var(--chameleon-offset-top-desktop);
             right: var(--chameleon-offset-right-desktop);
+        }
+
+        /* Spider-Man easter egg - see app.js's spiderman state machine for
+           the drop/retract logic. Layering is the critical part here: the
+           greeting text must stay fully readable no matter what frame he's
+           on, so #greeting-name/#greeting-sub are lifted into their own
+           positioned stacking contexts (z-index 1) with a HIGHER z-index
+           than the animation container - real CSS stacking rule, not a DOM-
+           order trick, so it holds regardless of where the animation
+           visually extends to. #spiderman-lottie is nested inside
+           #greeting-name (inside the wave emoji's own anchor span) rather
+           than positioned by fixed coordinates, specifically so it always
+           tracks the emoji's actual rendered position - the greeting name
+           varies in length per user, so the emoji isn't at a fixed x
+           offset, and anchoring to fixed coordinates from a shared ancestor
+           would drift out of place for longer/shorter names. */
+        /* #greeting-sub explicitly outranks #greeting-name (2 > 1) rather
+           than relying on them landing at the same z-index and falling
+           back to DOM-order tie-breaking (which happens to work today
+           since greeting-sub comes after greeting-name, but would silently
+           break if that order ever changed) - explicit beats implicit for
+           something this layering-sensitive. */
+        #greeting-name {
+            position: relative;
+            z-index: 1;
+        }
+        #greeting-sub {
+            position: relative;
+            z-index: 2;
+        }
+        .spiderman-anchor {
+            position: relative;
+            display: inline-block;
+        }
+        /* The emoji glyph itself gets a LOCAL z-index higher than
+           #spiderman-lottie (both are children of .spiderman-anchor, so
+           this comparison is purely local to that span) - otherwise the
+           animation container, being position:absolute, would paint over
+           its own sibling emoji text by default even though the ANCESTOR
+           h2 already out-ranks unrelated siblings like #greeting-sub. */
+        .wave-glyph {
+            position: relative;
+            z-index: 2;
+        }
+        .spiderman-perch {
+            position: absolute;
+            top: var(--spiderman-offset-top-desktop);
+            left: var(--spiderman-offset-left-desktop);
+            width: var(--spiderman-size-desktop);
+            height: var(--spiderman-perch-height-desktop);
+            z-index: 1;
+            pointer-events: none;
+            /* Resting (retracted) position by default - translateY(0).
+               dropSpiderman()/retractSpiderman() toggle the
+               .spiderman-dropped class to animate the real travel distance;
+               the Lottie's own frames (played independently via
+               playSegments) provide the character's own small settle
+               motion on top of this. */
+            transform: translateY(0);
+            transition: transform 0.4s ease-in-out;
+        }
+        .spiderman-perch.spiderman-dropped {
+            transform: translateY(var(--spiderman-drop-distance-desktop));
         }
 
         /* Scrollbar styling */
@@ -326,6 +391,20 @@
                 height: var(--chameleon-size-sidebar-mobile);
                 top: var(--chameleon-offset-top-mobile);
                 right: var(--chameleon-offset-right-mobile);
+            }
+
+            /* Spider-Man: same independent-per-breakpoint pattern as the
+               chameleon above - overriding the actual properties, not just
+               the desktop variables, so the two breakpoints can't bleed
+               into each other. */
+            .spiderman-perch {
+                top: var(--spiderman-offset-top-mobile);
+                left: var(--spiderman-offset-left-mobile);
+                width: var(--spiderman-size-mobile);
+                height: var(--spiderman-perch-height-mobile);
+            }
+            .spiderman-perch.spiderman-dropped {
+                transform: translateY(var(--spiderman-drop-distance-mobile));
             }
         }
 
@@ -628,6 +707,7 @@
             </div>
             <p class="text-center text-xs text-gray-600 mt-2">
                 YaraBot · Powered by Nova
+                is an AI which can make mistakes, Double check answers.
             </p>
         </div>
     </div>

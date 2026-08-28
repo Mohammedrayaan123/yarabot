@@ -62,6 +62,282 @@ const LOTTIE_VIEWBOX_CROPS = {
     [BOT_LOTTIE_URL]: "45 73 400 400",
 };
 
+// =========================================================
+// SPIDER-MAN EASTER EGG
+// Anchored to the wave emoji in the greeting name line ("[Name] 👋"),
+// which only exists on the pre-first-message greeting screen. See
+// initSpiderman()/teardownSpiderman() below for the full lifecycle.
+// =========================================================
+const SPIDERMAN_LOTTIE_URL = "/static/animation_spider.json";
+
+// Content bounds measured by rendering the file in lottie-web and reading
+// lottie.getRegisteredAnimations()[0].renderer.elements[i].finalTransform
+// at sampled frames (same technique as the chatbot.json crop fix - not
+// guessed): x spans 0-32, y spans -21 to 32 of the native 32x32 canvas.
+// The default "0 0 32 32" viewBox would clip everything above y=0, which
+// is where the character sits for almost the entire animation (he settles
+// at y=-21) - this crop is required for him to render at all, not cosmetic.
+const SPIDERMAN_VIEWBOX_CROP = "0 -21 32 53";
+
+// Frame ranges - also measured directly from the rendered animation, not
+// assumed from the filename/description:
+//   0-6    fade in (opacity 0 -> 1), near the top
+//   6-24   a small hang/settle wobble (y: -9 -> 0 -> -5 -> 0)
+//   24-32  the actual drop to the lowest point (y: 0 -> -21)
+//   32-62.33 (the rest of the file) - a DEAD HOLD. Every layer's position
+//   and opacity is byte-identical at frames 32, 40, 50, and 62 - confirmed
+//   both from the raw keyframe values (consecutive keyframes sharing the
+//   exact same value) and from live-rendered transform data. There is no
+//   baked-in "spring back up" sequence anywhere in this file.
+// Because of that, "retract" is implemented as the drop segment played in
+// REVERSE (lottie-web supports this natively: playSegments([end, start],
+// true) plays backwards) - the only way to get a retraction out of a file
+// that only ever animates downward.
+const SPIDERMAN_DROP_SEGMENT = [0, 32];
+const SPIDERMAN_LOWEST_FRAME = 32;
+const SPIDERMAN_RETRACTED_FRAME = 0;
+
+const SPIDERMAN_IDLE_MS = 30000;       // no typing for this long after he drops -> auto-retract
+const SPIDERMAN_REDROP_DELAY_MS = 5000; // after an idle-triggered retract, wait this long before re-checking
+
+let spidermanAnim = null;
+let spidermanIdleTimer = null;
+let spidermanRedropTimer = null;
+let spidermanInputTarget = null;   // the actual <textarea> the listener is attached to, for clean removal
+let spidermanInputListener = null;
+// Bumped by both initSpiderman() and teardownSpiderman() - guards against a
+// real race: loadLottieData() is async, so if the greeting gets hidden
+// (first message sent) or rebuilt (clearChat()) BEFORE that fetch
+// resolves, teardownSpiderman() runs while spidermanAnim is still null
+// (nothing to tear down yet) - a plain no-op. Without this counter, the
+// mount+drop that finishes moments later would go ahead anyway, leaving a
+// live, ticking instance (and idle timer) behind a hidden/replaced
+// greeting. Each async callback captures the generation at call time and
+// bails if it no longer matches - confirmed by a rapid-fire clearChat()
+// stress test that reproduced exactly this without the check.
+let spidermanGeneration = 0;
+// The logged-in user's profile, kept around so clearChat() can rebuild the
+// greeting (name/sub + the Spider-Man anchor) after wiping the DOM, the
+// same way showChatPage() builds it the first time.
+let currentProfile = null;
+
+// Explicit state, checked at the top of every trigger (page load, keystroke,
+// idle timeout, re-drop check) before it's allowed to act. Without this,
+// retractSpiderman() had no way to tell "already retracted" from "currently
+// hanging" and called playSegments() unconditionally on every single 'input'
+// event - with forceFlag:true that snaps the animation back to its segment's
+// START frame before playing, so every keystroke after the first replayed
+// the whole retract animation instead of being a no-op. Real bug, found via
+// live typing, not just a theoretical concern.
+//   'idle'      - nothing mounted/dropped yet
+//   'dropped'   - hanging at the settled frame, idle timer running
+//   'retracted' - pulled back up/out of view, nothing animating
+let spidermanState = "idle";
+
+/** Cancel both Spider-Man timers without touching the animation itself. */
+function clearSpidermanTimers() {
+    if (spidermanIdleTimer) { clearTimeout(spidermanIdleTimer); spidermanIdleTimer = null; }
+    if (spidermanRedropTimer) { clearTimeout(spidermanRedropTimer); spidermanRedropTimer = null; }
+}
+
+/**
+ * Full teardown: cancels pending timers, detaches the input listener, and
+ * destroys the Lottie instance. MUST run before the greeting is hidden
+ * (first message sent) or rebuilt (clearChat()) - otherwise a stale timer
+ * fires later and tries to animate/query an element that's gone, or a
+ * second init stacks a duplicate 'input' listener and a duplicate idle
+ * timer on top of the old one.
+ */
+function teardownSpiderman() {
+    spidermanGeneration++;   // invalidates any in-flight initSpiderman() mount
+    spidermanState = "idle";
+    clearSpidermanTimers();
+    if (spidermanInputTarget && spidermanInputListener) {
+        spidermanInputTarget.removeEventListener("input", spidermanInputListener);
+    }
+    spidermanInputTarget = null;
+    spidermanInputListener = null;
+    if (spidermanAnim) {
+        spidermanAnim.destroy();
+        spidermanAnim = null;
+    }
+}
+
+function armSpidermanIdleTimer() {
+    if (spidermanIdleTimer) clearTimeout(spidermanIdleTimer);
+    spidermanIdleTimer = setTimeout(() => {
+        spidermanIdleTimer = null;
+        retractSpiderman(true);   // idle-triggered - eligible for the 5s re-drop check
+    }, SPIDERMAN_IDLE_MS);
+}
+
+function dropSpiderman() {
+    if (!spidermanAnim) return;
+    if (spidermanState === "dropped") return;   // already hanging - nothing to do
+    spidermanState = "dropped";
+    // The Lottie file's OWN keyframed motion only ever moves the character
+    // ~25px on screen (measured directly) - nowhere close to spanning from
+    // the emoji down to the subtitle line. The real travel distance is this
+    // CSS class toggle (see .spiderman-perch.spiderman-dropped in
+    // index.html); playSegments() below just layers the character's own
+    // small settle motion on top of it.
+    const container = document.getElementById("spiderman-lottie");
+    if (container) container.classList.add("spiderman-dropped");
+    spidermanAnim.playSegments(SPIDERMAN_DROP_SEGMENT, true);
+    armSpidermanIdleTimer();
+}
+
+/**
+ * @param fromIdleTimeout - true only when the 30s idle timer itself fired.
+ * Typing (the 'input' listener) always calls this with false: it should
+ * retract him ONCE and stay retracted while the user keeps typing, never
+ * queue a re-drop.
+ */
+function retractSpiderman(fromIdleTimeout) {
+    if (!spidermanAnim) return;
+    // Any retraction cancels whatever's pending - including a re-drop
+    // queued by an EARLIER idle timeout, so typing during that 5s window
+    // correctly cancels the re-drop (point 4 of the spec). Safe to run even
+    // when already retracted (both are no-ops if nothing's armed).
+    if (spidermanIdleTimer) { clearTimeout(spidermanIdleTimer); spidermanIdleTimer = null; }
+    if (spidermanRedropTimer) { clearTimeout(spidermanRedropTimer); spidermanRedropTimer = null; }
+
+    // The actual animation call only fires on the state TRANSITION into
+    // "retracted" - every keystroke after the first correctly becomes a
+    // no-op here instead of replaying the retract animation from the top.
+    if (spidermanState !== "retracted") {
+        spidermanState = "retracted";
+        const container = document.getElementById("spiderman-lottie");
+        if (container) container.classList.remove("spiderman-dropped");
+        spidermanAnim.playSegments([SPIDERMAN_LOWEST_FRAME, SPIDERMAN_RETRACTED_FRAME], true);
+    }
+
+    if (fromIdleTimeout) {
+        spidermanRedropTimer = setTimeout(() => {
+            spidermanRedropTimer = null;
+            const input = document.getElementById("chat-input");
+            if (input && input.value.trim() === "") {
+                dropSpiderman();
+            }
+        }, SPIDERMAN_REDROP_DELAY_MS);
+    }
+}
+
+/**
+ * Mounts the animation into #spiderman-lottie (built fresh by
+ * renderGreeting()) and starts the drop -> idle -> retract state machine.
+ * Safe to call repeatedly - always tears down any previous instance first,
+ * so a second call (e.g. from clearChat() re-rendering the greeting) can't
+ * leave two Lottie instances or two sets of timers running at once.
+ */
+function initSpiderman() {
+    teardownSpiderman();
+    const myGeneration = spidermanGeneration;   // teardownSpiderman() just bumped it
+
+    const container = document.getElementById("spiderman-lottie");
+    const input = document.getElementById("chat-input");
+    if (!container || !input || typeof lottie === "undefined") return;
+
+    loadLottieData(SPIDERMAN_LOTTIE_URL).then(data => {
+        // The greeting may have been hidden (first message) or rebuilt
+        // (clearChat()) while this fetch was in flight - either one bumps
+        // spidermanGeneration, so a mismatch here means this mount is
+        // stale and must NOT proceed (that's what leaves an orphaned timer
+        // running behind a hidden/replaced greeting). container.isConnected
+        // is kept too as a second, independent guard for the same case.
+        if (!data || myGeneration !== spidermanGeneration || !container.isConnected) return;
+
+        // Two things need filtering out of the raw file before mounting -
+        // both found by direct measurement, not assumed:
+        //
+        // 1. A static, always-visible white background plate (a Lottie
+        //    "solid" layer, ty:1) covering the full native canvas - fine as
+        //    a standalone sticker, wrong for an overlay decoration on top
+        //    of the greeting text.
+        //
+        // 2. A genuine DUPLICATE of the character. The file has TWO image
+        //    assets ("vmN1QaQglt" and "6FjzSH3h6q") that are byte-identical
+        //    (confirmed via MD5) - the same artwork twice. Layer refId
+        //    "vmN1QaQglt" is the real, animated character (its position
+        //    keyframes actually change frame to frame - matched by its
+        //    matte layer, the shape immediately before it in the array).
+        //    Layer refId "6FjzSH3h6q" is a second copy that's permanently
+        //    fixed at the settled position and fades in early (by frame 6)
+        //    then never moves or disappears again - this is the "second
+        //    Spider-Man, stuck, never animates" bug: it was never a
+        //    mounting/duplication bug in this code, it's unfiltered
+        //    duplicate content in the source file itself. Removing it (and
+        //    its own dedicated matte layer, same adjacency rule) along with
+        //    the white background is what actually fixes it.
+        //
+        // Filtering the data before mounting (rather than hiding elements
+        // in the rendered SVG afterwards) is the more robust fix for both -
+        // it can't come back if a future lottie-web version changes how it
+        // structures the DOM. The cache holds the ORIGINAL fetched data
+        // (shared with anyone else who might load this URL), so build a
+        // filtered copy instead of mutating it in place.
+        const STUCK_DUPLICATE_REFID = "6FjzSH3h6q";
+        const rawLayers = data.layers || [];
+        const duplicateIdx = rawLayers.findIndex(l => l.refId === STUCK_DUPLICATE_REFID);
+        // Lottie track mattes aren't referenced by ID - the matte source is
+        // always the layer immediately ABOVE its consumer in the array,
+        // marked td:1. Confirmed on this file: index (duplicateIdx - 1) has
+        // td:1 and nothing else references it once the image above it is
+        // gone, so it must be dropped alongside it or it'd have nothing
+        // left consuming it.
+        const duplicateMatteIdx = (duplicateIdx > 0 && rawLayers[duplicateIdx - 1].td === 1)
+            ? duplicateIdx - 1 : -1;
+        const filteredData = {
+            ...data,
+            layers: rawLayers.filter((l, i) => l.ty !== 1 && i !== duplicateIdx && i !== duplicateMatteIdx)
+        };
+
+        spidermanAnim = lottie.loadAnimation({
+            container,
+            renderer: "svg",
+            loop: false,
+            autoplay: false,
+            animationData: filteredData,
+            rendererSettings: { preserveAspectRatio: "xMidYMid meet" }
+        });
+
+        spidermanAnim.addEventListener("DOMLoaded", () => {
+            // Same staleness guard as above - a teardown can still land in
+            // the (very short) window between lottie.loadAnimation() and
+            // this event firing.
+            if (myGeneration !== spidermanGeneration) return;
+            const svg = container.querySelector("svg");
+            if (!svg) return;
+            svg.setAttribute("viewBox", SPIDERMAN_VIEWBOX_CROP);
+            // lottie-web's SVG renderer ALSO applies its own internal
+            // clip-path, sized to the animation's native 0,0-32,32 canvas,
+            // independently of the viewBox above - found by checking the
+            // actual rendered getBoundingClientRect() of the character
+            // image at frame 32, which came back {x:0,y:0,w:0,h:0}
+            // (invisible) even with the viewBox already fixed. The
+            // character sits at y:-21 there - entirely above y:0 - so it
+            // was being clipped away before the viewBox crop ever had a
+            // chance to show it. Widening this clipPath's rect to the same
+            // bounds as SPIDERMAN_VIEWBOX_CROP (rather than removing
+            // clip-path entirely) keeps clipping active for anything
+            // genuinely outside the measured content area, while letting
+            // the actual artwork through.
+            const clipRect = svg.querySelector("clipPath rect");
+            if (clipRect) {
+                clipRect.setAttribute("x", "0");
+                clipRect.setAttribute("y", "-21");
+                clipRect.setAttribute("width", "32");
+                clipRect.setAttribute("height", "53");
+            }
+            dropSpiderman();
+        });
+
+        spidermanInputListener = () => retractSpiderman(false);
+        spidermanInputTarget = input;
+        input.addEventListener("input", spidermanInputListener);
+    });
+}
+
 function loadLottieData(url) {
     if (_lottieDataCache[url]) return Promise.resolve(_lottieDataCache[url]);
     if (_lottieLoadingCache[url]) return _lottieLoadingCache[url];
@@ -318,6 +594,55 @@ async function restoreSession() {
 }
 
 
+/**
+ * Renders the greeting block's text content (time/name/sub) and rebuilds
+ * the wave-emoji anchor structure Spider-Man mounts into. Called both from
+ * showChatPage() (first render) and clearChat() (the greeting reappears
+ * after a wipe) so the two never drift out of sync.
+ *
+ * Builds the name line via DOM methods rather than innerHTML - profile.name
+ * comes from the database, and this sidesteps any need to HTML-escape it
+ * for a one-line greeting.
+ */
+function renderGreeting(profile) {
+    const hour = new Date().getHours();
+    const timeGreeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+    const firstName = profile.name.split(" ")[0];
+    const sub = subGreetings[Math.floor(Math.random() * subGreetings.length)];
+
+    document.getElementById("greeting-time").textContent = timeGreeting;
+
+    const nameEl = document.getElementById("greeting-name");
+    nameEl.textContent = "";
+    nameEl.appendChild(document.createTextNode(firstName + " "));
+
+    // .spiderman-anchor is the positioning reference for #spiderman-lottie
+    // (see the CSS comment in index.html) - it's always present regardless
+    // of the randomized sub-greeting text, unlike anchoring to specific
+    // subtitle words would be.
+    const waveWrap = document.createElement("span");
+    waveWrap.className = "spiderman-anchor";
+
+    const waveGlyph = document.createElement("span");
+    waveGlyph.className = "wave-glyph";
+    waveGlyph.textContent = "👋";
+    waveWrap.appendChild(waveGlyph);
+
+    const spidermanContainer = document.createElement("div");
+    spidermanContainer.id = "spiderman-lottie";
+    spidermanContainer.className = "spiderman-perch";
+    spidermanContainer.setAttribute("aria-hidden", "true");
+    waveWrap.appendChild(spidermanContainer);
+
+    nameEl.appendChild(waveWrap);
+
+    // Nova's introduction prefixed onto the existing rotating sub-greeting -
+    // this is the first thing the assistant "says" before any chat happens.
+    // Purely a text change: subGreetings itself is untouched.
+    document.getElementById("greeting-sub").textContent = `Hi, I'm Nova! ${sub}`;
+}
+
+
 // =========================================================
 // SHOW CHAT PAGE
 // =========================================================
@@ -343,18 +668,10 @@ function showChatPage(profile) {
         mountBotLottie(sidebarChameleon, CHAMELEON_LOTTIE_URL);
     }
 
-    // Set greeting
-    const hour = new Date().getHours();
-    const timeGreeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
-    const firstName = profile.name.split(" ")[0];
-    const sub = subGreetings[Math.floor(Math.random() * subGreetings.length)];
-
-    document.getElementById("greeting-time").textContent = timeGreeting;
-    document.getElementById("greeting-name").textContent = `${firstName} 👋`;
-    // Nova's introduction prefixed onto the existing rotating sub-greeting -
-    // this is the first thing the assistant "says" before any chat happens.
-    // Purely a text change: subGreetings itself is untouched.
-    document.getElementById("greeting-sub").textContent = `Hi, I'm Nova! ${sub}`;
+    // Set greeting (+ mount the Spider-Man easter egg on the wave emoji)
+    currentProfile = profile;
+    renderGreeting(profile);
+    initSpiderman();
 
     // Build ID card
     buildIDCard(profile);
@@ -496,6 +813,7 @@ function handleSessionExpired() {
     removeTypingBubble();
     clearChat();
     userRole = null;
+    currentProfile = null;
 
     document.getElementById("chat-page").classList.add("hidden");
     document.getElementById("chat-page").classList.remove("flex");
@@ -528,6 +846,13 @@ async function sendMessage() {
     // Hide greeting on first message
     if (messageCount === 0) {
         document.getElementById("greeting").style.display = "none";
+        // The greeting isn't removed from the DOM here (just hidden via
+        // CSS), so cleanupDetachedLottie()'s isConnected check would never
+        // catch a stale Spider-Man timer/animation on its own - tear it
+        // down explicitly instead, or the 30s idle timer (and a possible
+        // 5s re-drop timer after it) keeps firing in the background,
+        // animating an element nobody can see, for the rest of the session.
+        teardownSpiderman();
     }
     messageCount++;
 
@@ -760,12 +1085,19 @@ function removeTypingBubble() {
 
 function clearChat() {
     messageCount = 0;
+
+    // Tear down BEFORE wiping the DOM: the innerHTML replacement below
+    // destroys the old #spiderman-lottie element out from under the
+    // running animation, and would otherwise leave its idle/re-drop timers
+    // dangling with nothing valid left to act on.
+    teardownSpiderman();
+
     const container = document.getElementById("chat-messages");
     // Remove all messages but keep the greeting
     container.innerHTML = `
         <div id="greeting" class="flex flex-col items-center justify-center h-full text-center pb-20">
             <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2"></div>
-            <h2 id="greeting-name" class="text-4xl font-bold text-gray-900 tracking-tight mb-2"></h2>
+            <h2 id="greeting-name" class="font-playfair text-4xl font-bold text-gray-900 tracking-tight mb-2"></h2>
             <p id="greeting-sub" class="text-base text-gray-500"></p>
         </div>
     `;
@@ -773,10 +1105,28 @@ function clearChat() {
     // animations rather than leaving them running in the background.
     cleanupDetachedLottie();
 
-    // Re-set greeting text
-    const hour = new Date().getHours();
-    document.getElementById("greeting-time").textContent =
-        hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+    // Re-set greeting text. Previously this only re-set greeting-time,
+    // leaving greeting-name/greeting-sub (and the wave emoji Spider-Man
+    // anchors to) blank after every "Clear Chat" click - a real bug, not
+    // just missing Spider-Man wiring: renderGreeting() does the full job
+    // (name + sub + rebuilding the wave-emoji anchor), the same call
+    // showChatPage() makes on first login, so the two can't drift apart
+    // again. initSpiderman() then starts a completely fresh state machine
+    // against the newly-built anchor - it already tears down any previous
+    // instance itself, so this can't stack duplicate timers on repeated
+    // clears.
+    if (currentProfile) {
+        renderGreeting(currentProfile);
+        initSpiderman();
+    } else {
+        // Defensive fallback - clearChat() should only ever run after
+        // showChatPage() has already set currentProfile, but degrade to
+        // the old minimal reset rather than leaving greeting-time blank
+        // too if that assumption is ever wrong.
+        const hour = new Date().getHours();
+        document.getElementById("greeting-time").textContent =
+            hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+    }
 }
 
 
