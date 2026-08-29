@@ -48,9 +48,25 @@ INTENT_DATA = {
         # "time table" (as two words) is a real gap: it doesn't literally
         # contain "timetable" as one token, so it scored nothing before -
         # confirmed via real user testing routing it to Gemini instead of NLP.
+        #
+        # "todays"/"today's" pairs below: clean_question() only strips
+        # ?!., - it does NOT normalize apostrophes, and "todays" isn't a
+        # CONTRACTIONS entry either, so "todays timetable" and "today's
+        # timetable" are two genuinely different substrings after cleaning.
+        # Real gap found via testing: "whats todays timetable"/"whats
+        # todays classes" (the actual casual, no-apostrophe phrasing real
+        # students type) scored a GENUINE ZERO before this - "timetable"/
+        # "classes" are both in AMBIGUOUS_KEYWORDS, so a bare keyword match
+        # with no phrase and no personal_signal wording ("todays" isn't a
+        # first-person pronoun) was silently discarded entirely, not even
+        # weakly. Both spellings of every today's-schedule phrasing are
+        # listed explicitly so the common casual form is caught for free,
+        # instantly, without ever needing the classifier lane.
         "phrases": ["my timetable", "my schedule", "class schedule", "today's classes",
-                    "time table", "class routine", "today's schedule", "weekly timetable",
-                    "my periods today", "what's my schedule"],
+                    "todays classes", "time table", "class routine", "today's schedule",
+                    "todays schedule", "today's timetable", "todays timetable",
+                    "weekly timetable", "my periods today", "what's my schedule",
+                    "what classes today"],
         "keywords": ["timetable", "schedule", "periods", "classes", "routine"],
     },
     "fee": {
@@ -177,9 +193,45 @@ INTENT_DATA = {
         "phrases": ["schedule for", "timetable for teacher"],
         "keywords": ["schedule"],
     },
+    # General (not live/current-period) timetable for a whole CLASS - "what's
+    # 10-A's week look like" - distinct from classroom_occupant (who's
+    # teaching THIS class right now, one live period) and from
+    # teacher_schedule_lookup (a specific named TEACHER's schedule, not a
+    # class's). "schedule for <class code>" (no "class" word at all, e.g.
+    # "schedule for 10a") genuinely can't be told apart from
+    # teacher_schedule_lookup's own "schedule for" phrase by substring
+    # matching alone - both are handled the same way: app.py's
+    # answer_principal() redirects a teacher_schedule_lookup match here
+    # when a class code is present but no real named teacher was found,
+    # since that means the narrower named-teacher intent's own handler
+    # would have had nothing to work with anyway.
+    "class_timetable_lookup": {
+        "phrases": ["timetable for class", "schedule for class", "class timetable",
+                    "class schedule", "class routine"],
+        "keywords": ["timetable", "schedule", "class", "classes"],
+        "class_code_bypass": True,
+    },
     "school_wide_subject_teacher": {
         "phrases": ["who teaches", "teacher for subject"],
         "keywords": ["teaches"],
+    },
+    # ALL subject-teacher pairs for a whole CLASS - "who teaches 10-A" (every
+    # subject) - distinct from classroom_occupant (who's in THIS class right
+    # now, one live period, one subject) and from school_wide_subject_teacher
+    # (which teacher teaches a given SUBJECT school-wide, not a class's full
+    # roster). "who teaches <class code>" (e.g. "who teaches 10a") shares the
+    # exact same "who teaches" phrase as school_wide_subject_teacher with
+    # nothing else to distinguish "10a" from a subject name by substring
+    # matching alone - same redirect pattern as class_timetable_lookup
+    # above: app.py's answer_principal() redirects a school_wide_subject_
+    # teacher match here when a class code is present but no real subject
+    # name was found in the question.
+    "class_teacher_lookup": {
+        "phrases": ["who teaches class", "teacher for class", "teachers for class",
+                    "who is the teacher for class", "class teachers", "class teacher",
+                    "teachers assigned to class"],
+        "keywords": ["teacher", "teachers", "teach", "teaches", "class", "classes"],
+        "class_code_bypass": True,
     },
     "low_attendance_count": {
         "phrases": ["low attendance", "below 75", "attendance risk",
@@ -306,6 +358,31 @@ def has_personal_signal(cleaned_question):
     return bool(_PERSONAL_SIGNAL_RE.search(cleaned_question))
 
 
+# Mirrors app.py's extract_class_from_question() pattern - kept as a
+# separate regex here rather than imported, since app.py already imports
+# FROM this module (importing back would be circular). Update both together
+# if the class-code format this school uses ever changes. cleaned_question
+# is already lowercased by clean_question(), so [a-z] (not [A-Za-z]) is
+# enough here.
+_CLASS_CODE_RE = re.compile(r'\b\d{1,2}[\s-]?[a-z]\b')
+
+
+def has_class_code(cleaned_question):
+    """
+    True if a specific class code (e.g. "10-a"/"10a"/"10 a") is mentioned
+    anywhere in the question. A second, separate signal alongside
+    has_personal_signal() that can lift the AMBIGUOUS_KEYWORDS block in
+    score_intent() - a real class code is just as strong, unambiguous
+    evidence that a bare "class"/"teacher" keyword match is a genuine
+    question (not a coincidental almanac-flavored word) as first-person
+    wording is for personal-data intents. Opt-in per intent (see
+    INTENT_DATA's "class_code_bypass" flag) rather than universal, so this
+    only loosens the ambiguous-keyword guard for intents that are actually
+    ABOUT a specific class.
+    """
+    return bool(_CLASS_CODE_RE.search(cleaned_question))
+
+
 def clean_question(question):
     """Lowercase, expand contractions, strip punctuation.
 
@@ -333,7 +410,7 @@ def tokenize(question):
     return [w for w in words if w not in STOPWORDS]
 
 
-def score_intent(cleaned_question, words, intent_name, personal_signal):
+def score_intent(cleaned_question, words, intent_name, personal_signal, class_code_present=False):
     """Return a score for how well the question matches one intent.
     Higher score = stronger match. Phrase matches count more than
     single-word matches, since phrases are more specific/reliable.
@@ -345,18 +422,28 @@ def score_intent(cleaned_question, words, intent_name, personal_signal):
     mode: a single common word that also belongs to a real personal-data
     intent, with nothing else backing up the guess. Non-ambiguous keywords
     are unaffected and still score normally on their own, same as before.
+
+    class_code_present: whether a specific class code (see has_class_code())
+    is mentioned anywhere in the question - a second bypass alongside
+    personal_signal, but opt-in per intent via INTENT_DATA's
+    "class_code_bypass" flag rather than universal. Only intents genuinely
+    ABOUT a specific class (class_timetable_lookup, class_teacher_lookup)
+    set that flag - a class code appearing in an unrelated question must
+    not quietly loosen every other intent's ambiguous-keyword protection.
     """
     data = INTENT_DATA[intent_name]
     score = 0
 
     # Phrase matches (checked against the whole cleaned question, not
     # word by word) - these are strong signals, worth more points, and
-    # always count regardless of personal_signal.
+    # always count regardless of personal_signal/class_code_present.
     phrase_matched = False
     for phrase in data["phrases"]:
         if phrase in cleaned_question:
             score += 3
             phrase_matched = True
+
+    bypass_signal = personal_signal or (class_code_present and data.get("class_code_bypass", False))
 
     # Single word matches, with fuzzy typo tolerance
     for word in words:
@@ -364,7 +451,7 @@ def score_intent(cleaned_question, words, intent_name, personal_signal):
         if not close:
             continue
         matched_keyword = close[0]
-        if matched_keyword in AMBIGUOUS_KEYWORDS and not phrase_matched and not personal_signal:
+        if matched_keyword in AMBIGUOUS_KEYWORDS and not phrase_matched and not bypass_signal:
             continue
         score += 1
 
@@ -383,12 +470,13 @@ def detect_intent_with_score(question, possible_intents, confidence_threshold=1)
     cleaned = clean_question(question)
     words = tokenize(cleaned)
     personal_signal = has_personal_signal(cleaned)
+    class_code_present = has_class_code(cleaned)
 
     best_intent = None
     best_score = 0
 
     for intent_name in possible_intents:
-        score = score_intent(cleaned, words, intent_name, personal_signal)
+        score = score_intent(cleaned, words, intent_name, personal_signal, class_code_present)
         if score > best_score:
             best_score = score
             best_intent = intent_name

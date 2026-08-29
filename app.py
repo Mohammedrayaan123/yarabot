@@ -33,7 +33,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
 from nlp_helpers import detect_intent, detect_intent_with_score
-from gemini_rag import gemini_answer_stream, almanac_top_score
+from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent
 from config import DB_CONFIG
 import mysql.connector
 
@@ -180,9 +180,9 @@ ROLE_PERSONAL_INTENTS = {
                 "notices"],
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
                   "class_wise_count", "teacher_location", "classroom_occupant",
-                  "free_teachers", "teacher_schedule_lookup",
-                  "school_wide_subject_teacher", "low_attendance_count",
-                  "pending_fees_count", "notices"],
+                  "free_teachers", "teacher_schedule_lookup", "class_timetable_lookup",
+                  "school_wide_subject_teacher", "class_teacher_lookup",
+                  "low_attendance_count", "pending_fees_count", "notices"],
 }
 
 
@@ -278,37 +278,123 @@ def use_nlp_lane(question, role):
     problem, and Gemini's "I don't have that information" fallback is a
     safer failure mode than a wrong personal-data-flavored non-answer.
     """
+    return _nlp_lane_decision(question, role)[0]
+
+
+def get_routing_decision(question, role):
+    """
+    Public entry point for /api/chat's three-way routing split (NLP lane /
+    AI classifier lane / Gemini+almanac lane). Thin wrapper around
+    _nlp_lane_decision() - see its docstring for the full trigger rule.
+
+    Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
+    nlp_score: int). Exactly one of use_nlp / try_classifier is ever True;
+    both False means go straight to Gemini. nlp_intent/nlp_score are for
+    logging only - whichever weak (or absent) NLP match, if any, existed
+    when the decision was made.
+    """
+    return _nlp_lane_decision(question, role)
+
+
+def _nlp_lane_decision(question, role):
+    """
+    Core three-way routing decision behind use_nlp_lane() (plain bool) and
+    get_routing_decision() (the full picture) - one implementation so they
+    can never drift apart.
+
+    Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
+    nlp_score: int).
+
+    NLP-FIRST routing: after the pure-greeting shortcut, ask NLP directly
+    whether it recognizes the question as one of ITS OWN intents for this
+    role, and trust a confident (phrase-backed) match outright.
+
+    The general-knowledge check is skipped for personal-pronoun'd wording
+    (checked first, same as before) - without this, "what's my exam
+    schedule" would be misclassified as general knowledge purely because it
+    contains the general-knowledge phrase "exam schedule".
+
+    THE CLASSIFIER'S TRIGGER RULE (revised - see the real gap found via
+    live testing, described below): try_classifier is True whenever NEITHER
+    lane is confident - NLP's best score is zero or weak (no phrase match)
+    AND the almanac has no strong competing match either. It is the
+    genuine last line of defense before the generic Gemini "I don't have
+    that information" fallback, not a narrow edge-case patch. It is False
+    whenever EITHER lane already is confident (a phrase-backed NLP match,
+    a real-but-weak NLP match with no almanac competition, or a strong
+    almanac match on its own) - those already resolve correctly for free,
+    so spending an extra Groq call on them would only add cost/latency for
+    zero benefit, breaking the deliberately cost-conscious design.
+
+    Real gap this revision fixes: the ORIGINAL version of this function
+    only ever set try_classifier when NLP's score was weak-but-NONZERO
+    (lost the almanac tie-break) - a genuine zero score skipped the
+    classifier entirely by design. Real testing showed this missed the
+    single most common real failure mode: casual, pronoun-free phrasing
+    like "whats todays timetable"/"whats todays classes" scores a TRUE
+    ZERO, not weak-nonzero - "timetable"/"classes" are both in
+    AMBIGUOUS_KEYWORDS (nlp_helpers.py), so a bare keyword match with no
+    phrase and no personal-pronoun wording is silently discarded entirely,
+    not even weakly, by score_intent() itself. Those questions never
+    reached the classifier at all under the old rule and fell straight
+    through to Gemini's generic fallback. This revision treats "zero" and
+    "weak" the same way for classifier eligibility - both mean "NLP isn't
+    confident" - while still requiring the almanac to ALSO not be
+    confident, preserving the cost-conscious "only genuinely uncertain
+    cases" design the classifier was always meant to have.
+
+    Personal-pronoun'd wording with a real (even weak) NLP match is still
+    trusted outright without involving the almanac or the classifier at
+    all - unchanged from before, matches confirmed-working behavior (e.g.
+    "how many days was I absent" -> weak attendance match, correctly
+    answered today). A personal-pronoun'd question that finds NOTHING at
+    all (genuine zero) now falls into the same "neither lane confident"
+    check as pronoun-free questions, rather than taking a doomed detour
+    through the plain NLP lane first (which would just fail again inside
+    answer_student() and fall through to Gemini one step later anyway) -
+    this converges every role's genuine-zero-score handling onto one
+    consistent path instead of two slightly different ones.
+    """
     if is_pure_greeting(question):
-        return True
+        return True, False, None, 0
 
-    if role not in DB_FIRST_ROLES and is_personal_question(question):
-        return True
+    has_personal_pronoun = role not in DB_FIRST_ROLES and is_personal_question(question)
 
-    if is_general_knowledge_question(question):
-        return False
+    if not has_personal_pronoun and is_general_knowledge_question(question):
+        return False, False, None, 0
 
     intent, nlp_score = detect_intent_with_score(question, ROLE_PERSONAL_INTENTS.get(role, []))
 
     # Phrase-backed match (score >= 3): trust it outright, no need to even
     # check the almanac - a real phrase match is strong enough evidence on
-    # its own (and Fix 1 already keeps bare-keyword matches honest).
+    # its own (and nlp_helpers.py's AMBIGUOUS_KEYWORDS fix already keeps
+    # bare-keyword matches honest).
     if intent is not None and nlp_score >= NLP_PHRASE_MATCH_SCORE:
-        return True
+        return True, False, intent, nlp_score
+
+    if has_personal_pronoun and intent is not None:
+        return True, False, intent, nlp_score
 
     almanac_score = almanac_top_score(question)
-    strong_almanac_match = almanac_score >= ALMANAC_STRONG_MATCH_SCORE
+    almanac_confident = almanac_score >= ALMANAC_STRONG_MATCH_SCORE and almanac_score >= nlp_score
 
     if intent is not None:
-        # Weak (keyword-only) match - only give it up if the almanac has at
-        # least as much evidence for the general-knowledge reading.
-        if strong_almanac_match and almanac_score >= nlp_score:
-            return False
-        return True
+        # Weak (keyword-only) match, no personal-pronoun protection. If the
+        # almanac ALSO isn't confidently ahead, neither lane is sure -
+        # classifier's turn. Otherwise the weak match wins on its own
+        # merits, same as before.
+        if almanac_confident:
+            return False, True, intent, nlp_score
+        return True, False, intent, nlp_score
 
-    if role in DB_FIRST_ROLES:
-        return not strong_almanac_match
+    # intent is None: a genuine zero, with or without personal-pronoun
+    # wording. A confident almanac match still wins outright with no need
+    # for the classifier; otherwise this is exactly the "neither lane
+    # confident" gap the classifier exists to catch.
+    if almanac_score >= ALMANAC_STRONG_MATCH_SCORE:
+        return False, False, None, 0
 
-    return False
+    return False, True, None, 0
 
 app = Flask(__name__)
 
@@ -608,17 +694,23 @@ def chat():
 
     question_lower = question.lower()
 
-    # TWO-LANE ROUTING:
+    # THREE-LANE ROUTING:
     # Lane 1: Personal question → NLP + MySQL (private, personal data).
     #         Already instant (a single DB lookup), so it stays a normal
     #         JSON response - streaming would add complexity for no benefit
     #         on an answer that arrives in one piece anyway.
-    # Lane 2: General question → Gemini + almanac (school-wide info).
+    # Lane 2: AI classifier - the "neither lane is confident" last line of
+    #         defense (see get_routing_decision()/_nlp_lane_decision()'s
+    #         docstring) before giving up to the generic fallback. Also a
+    #         plain JSON response, same reasoning as Lane 1.
+    # Lane 3: General question → Gemini + almanac (school-wide info).
     #         Gemini calls take a few seconds; this lane streams so the
     #         reply appears incrementally instead of the user staring at
     #         the typing indicator for the whole round trip.
 
-    if use_nlp_lane(question_lower, role):
+    use_nlp, try_classifier, weak_intent, weak_score = get_routing_decision(question_lower, role)
+
+    if use_nlp:
         # Personal lane — use NLP + MySQL
         print(f'[NLP LANE] Question: {question_lower}')
         if role == "student":
@@ -642,6 +734,44 @@ def chat():
             return stream_gemini_reply(question_lower)
 
         return jsonify({"reply": reply})
+
+    # CLASSIFIER LANE: fires whenever get_routing_decision() found NEITHER
+    # lane confident - NLP's best score was zero or weak AND the almanac
+    # had no strong competing match either. This is the genuine last line
+    # of defense before the generic Gemini "I don't have that information"
+    # fallback, not a narrow edge case - a question either lane already
+    # confidently resolved never reaches here at all.
+    if try_classifier:
+        # classify_personal_intent() already catches its own errors and
+        # returns None on any failure - this try/except is a second,
+        # belt-and-suspenders layer at the call site itself. Real bug found
+        # via live testing: a monkeypatched classifier that raised directly
+        # (simulating a failure mode outside that function's own try/except -
+        # e.g. a future bug in it, or an exception type genuinely missed)
+        # took down the whole /api/chat request with an unhandled 500
+        # instead of degrading to Gemini, which is exactly the "must fail
+        # open, never break the existing flow" guarantee this lane is
+        # required to hold regardless of what goes wrong inside the call.
+        try:
+            classified_intent = classify_personal_intent(
+                question_lower, role, ROLE_PERSONAL_INTENTS.get(role, [])
+            )
+        except Exception as e:
+            print(f'[CLASSIFIER LANE ERROR] Question: {question_lower} -> {e}')
+            classified_intent = None
+
+        if classified_intent is not None:
+            print(f'[CLASSIFIER LANE] Question: {question_lower} -> {classified_intent} '
+                  f'(NLP: {weak_intent!r} score {weak_score}, almanac not confident)')
+            if role == "student":
+                reply = answer_student(question_lower, linked_id, forced_intent=classified_intent)
+            elif role == "teacher":
+                reply = answer_teacher(question_lower, linked_id, forced_intent=classified_intent)
+            else:  # principal
+                reply = answer_principal(question_lower, forced_intent=classified_intent)
+            return jsonify({"reply": reply})
+        # Classifier picked NONE, or the call failed/errored - fail open,
+        # fall through to the exact same Gemini/almanac lane as today.
 
     # General lane — use Gemini + almanac, streamed
     return stream_gemini_reply(question_lower)
@@ -1222,6 +1352,57 @@ def handle_teacher_schedule_lookup(question):
     return f"**{name}**'s schedule:\n" + "\n".join(lines)
 
 
+def handle_class_timetable_lookup(question):
+    """
+    Full (not just current-period) timetable for a specific class - all
+    periods, all days, or day-filtered if one is mentioned, via the same
+    extract_day_from_question() helper handle_teacher_schedule_lookup()
+    above uses. Distinct from handle_classroom_occupant() (who's teaching
+    THIS class right now, one live period only) - this is the general
+    "what does 10-A's week look like" question, same query/output shape as
+    handle_student_timetable()/handle_teacher_timetable(), just keyed by
+    class instead of student/teacher.
+    """
+    cls = extract_class_from_question(question)
+    if not cls:
+        return "Which class's timetable would you like to see? Please include the class (e.g. 10-A)."
+
+    day = extract_day_from_question(question)
+
+    base_query = """
+        SELECT t.day, t.period_no, s.subject_name, te.name
+        FROM timetable t
+        JOIN subjects s ON t.subject_id = s.subject_id
+        JOIN teachers te ON t.teacher_id = te.teacher_id
+        WHERE t.class = %s
+    """
+    params = [cls]
+
+    if day:
+        base_query += " AND LOWER(t.day) = %s"
+        params.append(day)
+
+    base_query += """
+        ORDER BY FIELD(t.day,'Monday','Tuesday','Wednesday',
+                       'Thursday','Friday','Saturday'), t.period_no
+    """
+
+    results = query(base_query, tuple(params), fetch=True, many=True)
+
+    if not results:
+        if day:
+            return f"No classes scheduled for **{cls}** on {day.capitalize()}."
+        return f"No timetable found for **{cls}** yet."
+
+    if day:
+        lines = [f"- Period {p}: **{subj}** with {teacher}" for _, p, subj, teacher in results]
+        return f"**{cls}**'s timetable for **{day.capitalize()}**:\n" + "\n".join(lines)
+
+    lines = [f"- **{d}**, Period {p}: {subj} *(with {teacher})*"
+             for d, p, subj, teacher in results]
+    return f"**{cls}**'s timetable:\n" + "\n".join(lines)
+
+
 def handle_school_wide_subject_teacher(question):
     """Who teaches a specific subject in a specific class, anywhere in school."""
     subjects = query("SELECT DISTINCT subject_name FROM subjects", fetch=True, many=True) or []
@@ -1249,6 +1430,36 @@ def handle_school_wide_subject_teacher(question):
         lines = [f"- **{c}**: {name}" for name, c in results]
         return f"Teachers for **{subject}**:\n" + "\n".join(lines)
     return f"No teacher found for {subject}" + (f" in {cls}." if cls else ".")
+
+
+def handle_class_teacher_lookup(question):
+    """
+    Every subject-teacher pair assigned to a specific class - "Class 10-A:
+    Mathematics — Mr. X, Science — Ms. Y". Distinct from
+    handle_classroom_occupant() (who's in THIS class right now, one live
+    period, one subject) and from handle_school_wide_subject_teacher()
+    (which teacher(s) teach a given SUBJECT school-wide, not a class's full
+    roster) - this is the general "who are 10-A's teachers" question,
+    independent of the current time/period.
+    """
+    cls = extract_class_from_question(question)
+    if not cls:
+        return "Which class would you like to check? Please include the class (e.g. 10-A)."
+
+    results = query("""
+        SELECT DISTINCT s.subject_name, te.name
+        FROM timetable t
+        JOIN subjects s ON t.subject_id = s.subject_id
+        JOIN teachers te ON t.teacher_id = te.teacher_id
+        WHERE t.class = %s
+        ORDER BY s.subject_name
+    """, (cls,), fetch=True, many=True)
+
+    if not results:
+        return f"No teachers found for **{cls}** yet."
+
+    pairs = ", ".join(f"{subj} — {teacher}" for subj, teacher in results)
+    return f"**Class {cls}**: {pairs}"
 
 
 def handle_low_attendance_count():
@@ -1309,8 +1520,14 @@ def handle_teacher_count_by_subject(question):
 # =========================================================
 # NLP ANSWER FUNCTIONS
 # =========================================================
-def answer_student(question, student_id):
-    intent = detect_intent(
+def answer_student(question, student_id, forced_intent=None):
+    # forced_intent: set by the classifier lane in /api/chat when it already
+    # decided which intent this is (see classify_personal_intent() in
+    # gemini_rag.py) - skips detect_intent()'s keyword scoring entirely and
+    # goes straight into the same dispatch below, so there's exactly one
+    # place that knows how to actually answer each intent regardless of
+    # which routing path decided on it.
+    intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
          "identity", "roll_number", "my_class", "next_period", "subject_teacher",
@@ -1383,8 +1600,9 @@ def answer_student(question, student_id):
             "**attendance**, **exams**, **timetable**, **fees**, or your **details**.")
 
 
-def answer_teacher(question, teacher_id):
-    intent = detect_intent(
+def answer_teacher(question, teacher_id, forced_intent=None):
+    # forced_intent: see answer_student()'s matching comment above.
+    intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
          "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
@@ -1463,8 +1681,9 @@ def answer_teacher(question, teacher_id):
     return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
 
 
-def answer_principal(question):
-    intent = detect_intent(
+def answer_principal(question, forced_intent=None):
+    # forced_intent: see answer_student()'s matching comment above.
+    intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help",
          # Newer/more specific intents listed before their more generic
@@ -1478,9 +1697,35 @@ def answer_principal(question):
          # both cases against real input before wiring this in.
          "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
          "teacher_location", "classroom_occupant", "free_teachers",
-         "teacher_schedule_lookup", "school_wide_subject_teacher",
+         "teacher_schedule_lookup", "class_timetable_lookup",
+         "school_wide_subject_teacher", "class_teacher_lookup",
          "low_attendance_count", "pending_fees_count", "notices"]
     )
+
+    # Real collision found while adding class_timetable_lookup/
+    # class_teacher_lookup (see nlp_helpers.py's INTENT_DATA comments for
+    # both): teacher_schedule_lookup's "schedule for" and school_wide_
+    # subject_teacher's "who teaches" phrases are broad enough to ALSO
+    # phrase-match a class-code question with no named teacher/subject at
+    # all ("schedule for 10a", "who teaches 10a") - phrase matching is a
+    # literal substring check, so it genuinely cannot tell "schedule for
+    # <TEACHER NAME>" apart from "schedule for <CLASS CODE>" on its own.
+    # Redirect to the class-scoped intent specifically when a class code IS
+    # present AND no real named teacher/subject can be extracted from the
+    # question - that combination means the narrower, named-entity intent's
+    # own handler would have had nothing to work with anyway, so the
+    # class-scoped reading is the only one that can actually answer it.
+    # forced_intent (from the classifier lane) is never touched here - the
+    # classifier already makes this exact distinction itself when asked.
+    if forced_intent is None and extract_class_from_question(question):
+        if intent == "teacher_schedule_lookup":
+            teachers = query("SELECT teacher_id, name FROM teachers", fetch=True, many=True) or []
+            tid, _ = extract_teacher_name_from_question(question, teachers)
+            if not tid:
+                intent = "class_timetable_lookup"
+        elif intent == "school_wide_subject_teacher":
+            if not extract_subject_from_question(question, _known_subject_names()):
+                intent = "class_teacher_lookup"
 
     if intent == "greeting":
         return "Good day! I'm Nova. Ask me about student numbers, teachers, or class breakdowns. 😊"
@@ -1495,7 +1740,9 @@ def answer_principal(question):
                 "🚪 **Who's in a class** — *'who is teaching class 10-A'*\n"
                 "🆓 **Free teachers** — *'which teachers are free right now'*\n"
                 "🗓 **A teacher's schedule** — *'schedule for <name>'*\n"
+                "📅 **A class's timetable** — *'timetable for class 10-A'*\n"
                 "👩‍🏫 **Subject teachers** — *'who teaches math'*\n"
+                "🧑‍🏫 **A class's teachers** — *'who teaches class 10-A'*\n"
                 "⚠️ **Attendance risk** — *'students with low attendance'*\n"
                 "💰 **Pending fees** — *'pending fees'*\n"
                 "📢 **Notices** — *'any announcements'*")
@@ -1534,8 +1781,14 @@ def answer_principal(question):
     elif intent == "teacher_schedule_lookup":
         return handle_teacher_schedule_lookup(question)
 
+    elif intent == "class_timetable_lookup":
+        return handle_class_timetable_lookup(question)
+
     elif intent == "school_wide_subject_teacher":
         return handle_school_wide_subject_teacher(question)
+
+    elif intent == "class_teacher_lookup":
+        return handle_class_teacher_lookup(question)
 
     elif intent == "low_attendance_count":
         return handle_low_attendance_count()

@@ -161,7 +161,7 @@ if st.sidebar.button("Log Out"):
 page = st.sidebar.radio(
     "Go to",
     ["Students", "Teachers", "Subjects", "Timetable", "Exams", "Logins",
-     "Notices", "Almanac"]
+     "Notices", "Almanac", "Suggested Additions"]
 )
 
 
@@ -1112,3 +1112,109 @@ elif page == "Almanac":
 
     st.divider()
     st.caption(f"Current file size: {len(current_content)} characters")
+
+
+# =========================================================
+# PAGE: SUGGESTED ADDITIONS
+# Questions Nova (the Gemini lane) genuinely had no almanac context for -
+# see log_unanswered_question() in gemini_rag.py, which only logs a
+# question here when the final reply equalled NO_CONTEXT_MESSAGE exactly,
+# not every Gemini-lane question. Near-duplicate phrasings of the same
+# question are grouped into one row (ask_count) using the same
+# normalize_question() + word-overlap matching the response cache already
+# uses, at the same 0.85 similarity threshold.
+#
+# NOTHING here is ever applied automatically - every "Add to Almanac"
+# requires a human admin to type the actual answer and click Save. Given
+# this project's repeated ambiguous-keyword routing bugs
+# (AMBIGUOUS_KEYWORDS in nlp_helpers.py), auto-modifying almanac content or
+# routing without review is exactly the kind of risk that bug class came
+# from - this page is a review queue, not an auto-apply pipeline.
+# =========================================================
+elif page == "Suggested Additions":
+    st.title("💡 Suggested Additions")
+    st.caption(
+        "Questions students, teachers, or the principal asked that Nova genuinely "
+        "couldn't answer, sorted by how often they've been asked. Add the ones worth "
+        "having to the almanac (with your own answer), or dismiss the rest."
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, question_text, ask_count, first_asked, last_asked "
+        "FROM unanswered_questions ORDER BY ask_count DESC, last_asked DESC"
+    )
+    suggestions = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not suggestions:
+        st.info("No unanswered questions logged yet - once Nova can't answer something, it'll show up here.")
+    else:
+        # Must match gemini_rag.py's ALMANAC_PATH exactly - see the same
+        # note on the Almanac page above.
+        almanac_path = "school_almanac.txt"
+
+        for qid, question_text, ask_count, first_asked, last_asked in suggestions:
+            with st.expander(f"({ask_count}x) {question_text}"):
+                st.caption(f"First asked: {first_asked} · Last asked: {last_asked}")
+
+                col1, col2 = st.columns(2)
+                if col1.button("Add to Almanac", key=f"add_btn_{qid}"):
+                    st.session_state[f"show_add_form_{qid}"] = True
+
+                if col2.button("Dismiss", key=f"dismiss_btn_{qid}"):
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM unanswered_questions WHERE id=%s", (qid,))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.warning("Dismissed.")
+                    st.rerun()
+
+                if st.session_state.get(f"show_add_form_{qid}"):
+                    with st.form(f"add_form_{qid}"):
+                        topic = st.text_input(
+                            "Topic (what this almanac entry is about)",
+                            value=question_text,
+                        )
+                        answer = st.text_area(
+                            "Answer (what Nova should say)",
+                            height=120,
+                            help="Written as a plain statement, same style as the rest of the "
+                                 "almanac - not a Q&A format."
+                        )
+                        submit = st.form_submit_button("Save to Almanac")
+
+                        if submit:
+                            if not answer.strip():
+                                st.error("⚠️ Please write an answer before saving.")
+                            else:
+                                # Same read-then-write mechanism as the Almanac page above:
+                                # gemini_rag.py's get_almanac() picks up the mtime change
+                                # automatically, no restart needed.
+                                try:
+                                    with open(almanac_path, "r", encoding="utf-8") as f:
+                                        existing = f.read()
+                                except FileNotFoundError:
+                                    existing = ""
+
+                                new_section = f"{topic.strip()}\n{answer.strip()}"
+                                separator = "\n\n" if existing.strip() else ""
+                                updated = existing.rstrip("\n") + separator + new_section + "\n"
+
+                                with open(almanac_path, "w", encoding="utf-8") as f:
+                                    f.write(updated)
+
+                                conn = get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute("DELETE FROM unanswered_questions WHERE id=%s", (qid,))
+                                conn.commit()
+                                cursor.close()
+                                conn.close()
+
+                                st.session_state[f"show_add_form_{qid}"] = False
+                                st.success("✅ Added to the almanac! Nova can answer this immediately - no restart needed.")
+                                st.rerun()

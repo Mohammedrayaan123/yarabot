@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS notices (
 )
 """
 
+tables["unanswered_questions"] = """
+CREATE TABLE IF NOT EXISTS unanswered_questions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    question_text VARCHAR(500),
+    normalized_question VARCHAR(500),
+    ask_count INT DEFAULT 1,
+    first_asked DATETIME,
+    last_asked DATETIME
+)
+"""
+
 tables["users"] = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -120,7 +131,8 @@ CREATE TABLE IF NOT EXISTS users (
 # Run each CREATE TABLE statement, in order (order matters because of
 # foreign keys — e.g. 'timetable' refers to 'teachers' and 'subjects',
 # so those must exist first)
-creation_order = ["subjects", "teachers", "students", "timetable", "exams", "notes", "notices", "users"]
+creation_order = ["subjects", "teachers", "students", "timetable", "exams", "notes", "notices",
+                   "unanswered_questions", "users"]
 
 for table_name in creation_order:
     cursor.execute(tables[table_name])

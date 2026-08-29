@@ -19,8 +19,10 @@ consistent regardless of which provider actually responds.
 import os
 import re
 import time
+import mysql.connector
 from google import genai
 from openai import OpenAI
+from config import DB_CONFIG
 
 
 def load_almanac(path='school_almanac.txt'):
@@ -170,7 +172,7 @@ def almanac_top_score(question):
     return scored[0][0] if scored else 0
 
 
-# The two fallback messages used whenever Gemini can't (or shouldn't) answer.
+# The fallback messages used whenever Gemini can't (or shouldn't) answer.
 # Named constants instead of inline strings so ask_gemini(), the streaming
 # path below, and UNCACHEABLE_ANSWERS all stay in sync automatically - two
 # hand-typed copies of the same string is exactly how they'd quietly drift.
@@ -182,6 +184,19 @@ API_ERROR_MESSAGE = (
     "I'm having trouble connecting to my knowledge base right now. "
     "Please contact the school office for this information."
 )
+# Real gap found while wiring up Suggested Additions (log_unanswered_question()
+# below): NO_CONTEXT_MESSAGE is ONLY ever produced by the short-circuit "context
+# is completely empty" path (ask_gemini()/ask_groq() below, before Gemini is
+# even called) - it is NOT what a live Gemini/Groq call actually says when it
+# has SOME weak, irrelevant almanac context (e.g. a question like "does the
+# school have a swimming pool" scores >0 just from generic words like
+# "school") but genuinely can't answer from it. In that (far more common in
+# practice) case, the model instead follows _build_prompt()'s own instructed
+# refusal wording below - a DIFFERENT string. Named as its own constant, used
+# in the prompt template AND checked alongside NO_CONTEXT_MESSAGE wherever
+# "did Gemini draw a blank" is decided, so both real "no info" paths are
+# actually covered instead of only the rarer one.
+GEMINI_DECLINED_PHRASE = "I don't have that information — please contact the school office directly."
 
 GEMINI_MODEL = 'gemini-3.5-flash-lite'
 
@@ -215,7 +230,7 @@ def _build_prompt(question, context):
     return f"""You are a helpful assistant for Yara International School in Riyadh, Saudi Arabia.
 Answer the question using ONLY the school information provided below.
 If the answer is not clearly in the provided information, say exactly:
-"I don't have that information — please contact the school office directly."
+"{GEMINI_DECLINED_PHRASE}"
 Never make up dates, events, or policies. Keep your answer concise, friendly, and accurate.
 Use bullet points if listing multiple dates or items.
 
@@ -267,6 +282,87 @@ def ask_groq(question, context):
     except Exception as e:
         print(f'[GROQ ERROR] {e}')
         return API_ERROR_MESSAGE
+
+
+# =========================================================
+# UNCERTAIN-MATCH CLASSIFIER
+# A middle step in app.py's routing pipeline, between "NLP tried and got a
+# weak/nonzero score" and "give up and route to Gemini/almanac" - see
+# get_weak_nlp_match()/_nlp_lane_decision() in app.py for exactly which
+# questions reach this. One more real chance to catch a personal-data
+# question phrased in a way nlp_helpers.py's keyword lists weren't
+# explicitly taught (e.g. "how many days was I absent" for attendance),
+# before falling through to the general-knowledge lane.
+# =========================================================
+def classify_personal_intent(question, role, possible_intents):
+    """
+    Asks Groq to pick exactly one of possible_intents (the real,
+    role-specific list from app.py's ROLE_PERSONAL_INTENTS) for this
+    question, or NONE if it's general school information rather than
+    something personal to this user.
+
+    Privacy boundary: sends ONLY the question text, the role label, and the
+    intent NAMES - never any student/personal data (no attendance numbers,
+    grades, fee status, names). Same boundary as the existing Gemini/
+    almanac lane, which also only ever sees the question and almanac text.
+
+    Fails open, always: returns None (never raises) on a NONE response, an
+    unrecognized/malformed response, or any error at all (timeout, rate
+    limit, API failure). The caller's only contract with this function is
+    "a real intent name, or None" - None always means "fall through to the
+    normal Gemini/almanac lane, exactly as if this function didn't exist".
+    Given this project's repeated ambiguous-keyword routing bug class, an
+    AI classifier that's ALSO uncertain must never be allowed to force a
+    guess through - failing open here is as deliberate as the "nothing
+    auto-applies" rule on the Suggested Additions almanac review queue.
+    """
+    intent_list = "\n".join(f"- {name}" for name in possible_intents)
+    prompt = f"""A {role} at a school is using a chatbot. Decide which ONE category their question belongs to.
+
+CATEGORIES:
+{intent_list}
+- NONE (this is general school information - a holiday, policy, event, or anything not specific to this {role} personally)
+
+QUESTION: "{question}"
+
+Reply with ONLY the category name exactly as written above, or NONE. No explanation, no punctuation, nothing else."""
+
+    try:
+        # Built fresh per call, same reasoning as ask_groq()'s client above.
+        client = OpenAI(api_key=os.getenv('GROQ_API_KEY'), base_url='https://api.groq.com/openai/v1')
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{'role': 'user', 'content': prompt}],
+            temperature=0,   # a classification pick, not creative writing - the same input should always get the same category
+            # Real bug found via live testing: GROQ_MODEL ('openai/gpt-oss-20b')
+            # is a reasoning model that emits its chain-of-thought as part of
+            # the same token budget max_tokens caps - a tight cap here (originally
+            # 20, sized for "a bare category name is a few tokens") let the
+            # reasoning alone exhaust the whole budget before any visible answer
+            # token came out, so `content` came back '' on EVERY real call, which
+            # this function's own fail-open design silently swallowed as "no
+            # match" - it looked like it was working (always failing open with no
+            # error) while never actually classifying anything. Confirmed by
+            # inspecting response.choices[0].message.reasoning directly: real,
+            # correct reasoning ("periods still to go... matches
+            # periods_remaining") was being generated and then thrown away.
+            # 300 is generous enough for this reasoning + a one-word answer.
+            max_tokens=300,
+        )
+        raw_answer = response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f'[CLASSIFIER ERROR] {e}')
+        return None
+
+    # Exact match against the real intent list (case-insensitive, tolerant
+    # of stray punctuation the model might add around it) - anything else,
+    # including a literal "NONE", is treated the same as a failed call.
+    cleaned = raw_answer.strip().strip('.').strip('"').strip("'").lower()
+    for name in possible_intents:
+        if cleaned == name.lower():
+            return name
+
+    return None
 
 
 def ask_gemini(question, context):
@@ -342,6 +438,26 @@ def _singularize(word):
     return word[:-1] if len(word) > 3 and word.endswith('s') else word
 
 
+def _normalized_word_set(normalized_question):
+    """Turns an already-normalize_question()'d string into the singularized
+    word set find_cached_answer() (and now log_unanswered_question() below)
+    both match against - factored out so the two share one definition of
+    "same underlying question" instead of two copies that could drift."""
+    return {_singularize(w) for w in normalized_question.split()}
+
+
+def _overlap_score(words_a, words_b):
+    """
+    Overlap coefficient between two word sets: how much of the SHORTER
+    set's words appear in the other. See find_cached_answer()'s docstring
+    for why this (not character-level diffing) is used - short questions
+    like "ptm" vs "ptm date" should still score as a strong match.
+    """
+    if not words_a or not words_b:
+        return 0
+    return len(words_a & words_b) / min(len(words_a), len(words_b))
+
+
 def find_cached_answer(normalized_question):
     """
     Check cache for a similar question.
@@ -361,7 +477,7 @@ def find_cached_answer(normalized_question):
     best_match = None
     best_score = 0
 
-    query_words = {_singularize(w) for w in normalized_question.split()}
+    query_words = _normalized_word_set(normalized_question)
 
     for cached_q, entry in list(_cache.items()):
         # Remove expired entries
@@ -369,11 +485,8 @@ def find_cached_answer(normalized_question):
             del _cache[cached_q]
             continue
 
-        cached_words = {_singularize(w) for w in cached_q.split()}
-        if not query_words or not cached_words:
-            continue  # a stopwords-only question has nothing to match on
-
-        overlap = len(query_words & cached_words) / min(len(query_words), len(cached_words))
+        cached_words = _normalized_word_set(cached_q)
+        overlap = _overlap_score(query_words, cached_words)
         if overlap > best_score:
             best_score = overlap
             best_match = entry['answer']
@@ -385,12 +498,93 @@ def find_cached_answer(normalized_question):
     return None
 
 
-# The two fallback messages (NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE) must
-# never be cached: caching a transient failure - we've hit a real 503 from
-# Gemini in testing - would serve "contact the office" to every similar
-# question for the full CACHE_TTL_SECONDS even after Gemini recovers
-# seconds later.
-UNCACHEABLE_ANSWERS = {NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE}
+# These three must never be cached. NO_CONTEXT_MESSAGE/API_ERROR_MESSAGE:
+# caching a transient failure - we've hit a real 503 from Gemini in testing -
+# would serve "contact the office" to every similar question for the full
+# CACHE_TTL_SECONDS even after Gemini recovers seconds later.
+# GEMINI_DECLINED_PHRASE has the same problem plus a second one specific to
+# Suggested Additions: caching it would (a) make find_cached_answer() serve
+# repeat askings straight from cache, skipping log_unanswered_question()
+# entirely, so ask_count could never actually go above 1, and (b) mean that
+# even after an admin adds the real answer to the almanac, anyone who already
+# triggered a cached refusal keeps getting that stale "I don't know" for up
+# to CACHE_TTL_SECONDS - defeating the "answerable immediately, no restart"
+# point of the feature for exactly the people who asked first.
+UNCACHEABLE_ANSWERS = {NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE, GEMINI_DECLINED_PHRASE}
+
+
+# =========================================================
+# SUGGESTED ADDITIONS
+# Tracks real content gaps - questions Gemini genuinely had no almanac
+# context for (NOT every Gemini-lane question, only ones that resolved to
+# NO_CONTEXT_MESSAGE - see the call sites in gemini_answer()/
+# gemini_answer_stream() below) - so the dashboard's "Suggested Additions"
+# page can surface them for a human admin to review.
+#
+# Deliberately does NOT touch school_almanac.txt or any routing logic on
+# its own. Given this project's repeated ambiguous-keyword routing bug
+# class (AMBIGUOUS_KEYWORDS in nlp_helpers.py, [[project-yarabot-overview]]
+# Checkpoint 5), auto-applying anything here without a human reading it
+# first is exactly the kind of risk that bug class came from - every
+# addition to the almanac still requires an admin to type the actual
+# answer and click Add in the dashboard.
+# =========================================================
+def log_unanswered_question(question):
+    """
+    Records (or, for a near-duplicate phrasing, increments) an unanswered
+    question in the unanswered_questions table.
+
+    Reuses find_cached_answer()'s exact grouping mechanism - same
+    normalize_question() + _normalized_word_set() + _overlap_score() at the
+    same CACHE_SIMILARITY_THRESHOLD (0.85) - so "when is sports day" and
+    "whens sports day" increment one row's ask_count instead of creating
+    separate near-duplicate entries, the same way they'd hit the same
+    cache entry.
+
+    Best-effort: a DB hiccup here must never break the chat reply already
+    being sent to the user, so failures are logged and swallowed rather
+    than raised.
+    """
+    normalized = normalize_question(question)
+    query_words = _normalized_word_set(normalized)
+    if not query_words:
+        return  # a stopwords-only/empty question has nothing to group on
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, normalized_question FROM unanswered_questions")
+        rows = cursor.fetchall()
+
+        best_id, best_score = None, 0
+        for row_id, stored_normalized in rows:
+            score = _overlap_score(query_words, _normalized_word_set(stored_normalized))
+            if score > best_score:
+                best_score = score
+                best_id = row_id
+
+        if best_score >= CACHE_SIMILARITY_THRESHOLD:
+            cursor.execute(
+                "UPDATE unanswered_questions "
+                "SET ask_count = ask_count + 1, last_asked = NOW() "
+                "WHERE id = %s",
+                (best_id,)
+            )
+            print(f'[UNANSWERED] Grouped into #{best_id} (score {best_score:.2f}): {question}')
+        else:
+            cursor.execute(
+                "INSERT INTO unanswered_questions "
+                "(question_text, normalized_question, ask_count, first_asked, last_asked) "
+                "VALUES (%s, %s, 1, NOW(), NOW())",
+                (question, normalized)
+            )
+            print(f'[UNANSWERED] New entry logged: {question}')
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f'[UNANSWERED LOG ERROR] {e}')
 
 
 def cache_answer(normalized_question, answer):
@@ -446,6 +640,12 @@ def gemini_answer(question):
 
     if answer in UNCACHEABLE_ANSWERS:
         print(f'[CACHE SKIPPED] Fallback/error answer not cached: {normalized}')
+        # Only a genuine "no info" answer gets logged - API_ERROR_MESSAGE is a
+        # transient system failure, not a content gap, and logging it would
+        # pollute Suggested Additions with questions Gemini may well have
+        # been able to answer once the API is reachable again.
+        if answer == NO_CONTEXT_MESSAGE or answer == GEMINI_DECLINED_PHRASE:
+            log_unanswered_question(question)
         return answer
 
     # Store in cache for next time - whichever provider actually answered.
@@ -543,5 +743,7 @@ def gemini_answer_stream(question):
                 return  # never cache a plain failure, partial or not
 
     full_answer = full_answer.strip()
+    if full_answer == NO_CONTEXT_MESSAGE or full_answer == GEMINI_DECLINED_PHRASE:
+        log_unanswered_question(question)
     if full_answer and full_answer not in UNCACHEABLE_ANSWERS:
         cache_answer(normalized, full_answer)
