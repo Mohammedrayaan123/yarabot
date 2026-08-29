@@ -2,7 +2,17 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- interactive-widget=resizes-content: tells the browser to actually
+         shrink the viewport (dvh/svh, visualViewport) around the on-screen
+         keyboard instead of its default "pan the page to keep focus
+         visible" behavior - THAT panning is what was yanking the whole
+         page (and the chat-input bar with it) up to the top of the screen
+         with a dead gap left behind, no matter how correctly --vvh was
+         computed, since panning happens independently of layout height.
+         Supported on Chrome/Edge 108+ and recent Safari; unsupported
+         browsers just ignore the token and fall back to the existing
+         visualViewport-driven --vvh fix already in place below. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
     <title>YaraBot - Powered by Nova</title>
     <!-- Was a bare filename-less request, so the browser silently requested
          /favicon.ico and got a 404 on every load - reusing the existing
