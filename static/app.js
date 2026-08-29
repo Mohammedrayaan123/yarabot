@@ -676,6 +676,31 @@ function initViewportHeightFix() {
         // effect instead of being overwritten with garbage.
         if (!(h > 0)) return;
         document.documentElement.style.setProperty("--vvh", `${h}px`);
+
+        // Real bug found live (real device, not reproducible through this
+        // tool's viewport emulation - CDP-level resize genuinely shrinks
+        // the layout viewport, so #chat-messages already fits with zero
+        // scroll room in every local test; a real on-screen keyboard only
+        // shrinks the VISUAL viewport unless the browser both supports and
+        // honors interactive-widget=resizes-content, so this has to cover
+        // the case where it doesn't): even with --vvh sized correctly, the
+        // browser's own native "scroll focused input into view" can still
+        // nudge either #chat-messages or the page itself down the instant
+        // the keyboard opens - body has overflow:hidden, which blocks the
+        // user's own drag-scroll gestures but NOT this programmatic reveal
+        // scroll on iOS - leaving the greeting/Spider-Man scrolled out of
+        // view above a dead gap, with nothing ever resetting it back.
+        // Resetting both possible scroll owners to their correct resting
+        // position - top if the greeting is still showing (no messages
+        // sent yet), otherwise the bottom, matching every other
+        // scroll-to-latest call in this file - on every keyboard
+        // transition overrides whichever one the browser nudged, instead
+        // of needing to know in advance which it was.
+        window.scrollTo(0, 0);
+        const container = document.getElementById("chat-messages");
+        if (container) {
+            container.scrollTop = messageCount === 0 ? 0 : container.scrollHeight;
+        }
     };
     window.visualViewport.addEventListener("resize", applyViewportHeight);
     applyViewportHeight();
