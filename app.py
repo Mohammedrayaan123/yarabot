@@ -28,7 +28,6 @@ import time
 import json
 import math
 
-# Add parent directory to path so we can import our existing helper files
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
@@ -39,9 +38,10 @@ import mysql.connector
 
 
 # =========================================================
-# TWO-LANE ROUTING
-# Lane 1 (personal)  -> NLP + MySQL. Private data never leaves the server.
-# Lane 2 (general)   -> Gemini + almanac. Only school-wide info is sent out.
+# ROUTING
+# Lane 1 (personal)   -> NLP + MySQL. Private data never leaves the server.
+# Lane 2 (classifier) -> Groq picks an intent when neither lane above is confident.
+# Lane 3 (general)    -> Gemini + almanac. Only school-wide info is sent out.
 # =========================================================
 
 # Words that strongly signal a PERSONAL question (needs MySQL)
@@ -49,12 +49,8 @@ PERSONAL_SIGNALS = [
     'my ', 'my ', ' i ', 'am i', 'do i', 'have i', 'i have',
     'mine', 'me ', ' me,', 'i am', "i'm", 'show me my',
     'what is my', 'what are my', "what's my",
-    # Bare/telegraphic forms of the new student intents, added after live
-    # testing: "roll no" and "next period" (no "my"/"I") don't match any
-    # signal above, so a student asking exactly that got routed to Gemini
-    # instead of NLP - a real feature gap, not just a theoretical one. Each
-    # is specific enough to a personal record that it's very unlikely to
-    # appear in a genuine general-knowledge almanac question instead.
+    # "roll no"/"next period" etc. have no "my"/"I" at all, so a student
+    # asking exactly that was routed to Gemini instead of NLP.
     'roll no', 'roll number', 'next period', 'next class',
 ]
 
@@ -70,25 +66,18 @@ def is_personal_question(question):
     return any(signal in q for signal in PERSONAL_SIGNALS)
 
 
-# Roles whose questions are nearly always about school records in MySQL.
-# A principal asks "how many students are there" and a teacher asks "which
-# classes are assigned" - both are database questions, but neither is worded
-# in the first person, so the PERSONAL_SIGNALS check alone would wrongly send
-# them to Gemini (which has no student counts in the almanac).
+# Teacher/principal questions are nearly always DB questions ("how many
+# students", "which classes are assigned") but rarely first-person, so
+# PERSONAL_SIGNALS alone would wrongly send them to Gemini.
 DB_FIRST_ROLES = {"teacher", "principal"}
 
-# Phrases that clearly point at school-wide almanac content (holidays, PTM,
-# admissions, policies, exam calendar, ...) rather than a specific person's
-# own records. Checked BEFORE the DB_FIRST_ROLES default below.
-#
-# Why this is needed: nlp_helpers.py's timetable intent treats "schedule" and
-# "classes" as keywords, so a teacher/principal asking "when is the exam
-# schedule for grade 9" (a school-wide almanac question) would otherwise
-# match that intent and get back THEIR OWN timetable instead - wrong data,
-# returned confidently. These phrases are deliberately multi-word/specific
-# (not bare "exam", "schedule", "class", "fee") so they don't collide with
-# genuine personal questions like "what's my exam schedule" or "what classes
-# am I in", which are still correctly caught by PERSONAL_SIGNALS for students.
+# Phrases that clearly point at school-wide almanac content, not a
+# person's own records. Needed because nlp_helpers.py's timetable intent
+# treats "schedule"/"classes" as keywords - without this, "when is the
+# exam schedule for grade 9" would match that intent and return the
+# ASKER's own timetable instead. Deliberately multi-word/specific so they
+# don't collide with genuine personal questions like "what's my exam
+# schedule", which PERSONAL_SIGNALS still catches correctly.
 GENERAL_KNOWLEDGE_SIGNALS = [
     "exam schedule", "exam date", "exam dates", "board exam",
     "half yearly", "half-yearly", "pre-board", "unit test schedule",
@@ -104,19 +93,11 @@ GENERAL_KNOWLEDGE_SIGNALS = [
     "school hours", "school timing", "office hours",
     "transport", "bus route",
 ]
-# "announcement" USED to be in this list, back when it protected nothing in
-# particular (school_almanac.txt has zero occurrences of "notice" or
-# "announcement" anywhere in it). Now that a real `notices` NLP intent
-# exists (nlp_helpers.py, backed by the new `notices` MySQL table), that
-# stale entry would have shadowed it completely - this list is checked
-# BEFORE detect_intent_with_score() ever runs, for every role, so a student
-# asking "any announcements" would have been forced to the Gemini/almanac
-# lane and gotten "I don't have that information" instead of their actual
-# notices. Removed rather than special-cased: nothing in the almanac
-# legitimately needs it, and the almanac_top_score() tie-break further down
-# in use_nlp_lane() already exists as the self-maintaining safety net for
-# the (currently nonexistent) case where a future almanac edit genuinely
-# does use the word "announcement".
+# "announcement" used to be in this list, but it shadowed the real
+# `notices` NLP intent (zero occurrences in school_almanac.txt anyway) -
+# "any announcements" was being forced to Gemini instead of the actual
+# notices. Removed; the almanac_top_score() tie-break further down covers
+# it if a future almanac edit ever legitimately uses the word.
 
 
 def is_general_knowledge_question(question):
@@ -128,19 +109,12 @@ def is_general_knowledge_question(question):
     return any(signal in q for signal in GENERAL_KNOWLEDGE_SIGNALS)
 
 
-# Exact allowlist of pure greeting/thanks/help pleasantries - checked as a
-# WHOLE-MESSAGE match, never a substring or fuzzy match.
-#
-# This used to call nlp_helpers.detect_intent(), which uses typo-tolerant
-# fuzzy matching (cutoff 0.75) so real typos like "helo" still work. That
-# caused a real production bug: a student asked "Shark Tank?" and got
-# "You're welcome!" back, because "tank" fuzzy-matches "thank" (a
-# thanks-intent keyword) at ~0.89 similarity - comfortably past the cutoff -
-# so the question never reached Gemini at all. An exact allowlist can't have
-# that failure mode: "tank" is not "thanks", full stop. The tradeoff is a
-# genuine typo'd greeting ("helo") won't be caught here and goes to Gemini
-# instead - a harmless, cheap miss, versus silently swallowing a real
-# question, which is not.
+# Exact allowlist, checked as a WHOLE-MESSAGE match, never substring/fuzzy.
+# Used to go through nlp_helpers.detect_intent()'s fuzzy matching, which
+# caused a real bug: "Shark Tank?" fuzzy-matched "thank" at ~0.89 and got
+# "You're welcome!" instead of reaching Gemini. A typo'd greeting like
+# "helo" now misses here and goes to Gemini instead - a harmless miss,
+# unlike silently swallowing a real question.
 GREETING_ONLY_PHRASES = {
     "hi", "hello", "hey", "yo",
     "good morning", "good afternoon", "good evening",
@@ -164,13 +138,9 @@ def is_pure_greeting(question):
     return cleaned in GREETING_ONLY_PHRASES
 
 
-# The intent names each role's answer_*() function actually recognizes
-# (mirrors the possible_intents lists passed to detect_intent() inside
-# answer_student/answer_teacher/answer_principal below), minus
-# greeting/thanks/help - those are already handled for free by
-# is_pure_greeting() before this is ever consulted. Used by use_nlp_lane()
-# to ask NLP directly "do you know how to answer this" instead of guessing
-# from pronouns.
+# The intent names each role's answer_*() actually recognizes (mirrors the
+# possible_intents lists in answer_student/teacher/principal below), minus
+# greeting/thanks/help - those are already handled by is_pure_greeting().
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
                 "roll_number", "my_class", "next_period", "subject_teacher",
@@ -186,97 +156,23 @@ ROLE_PERSONAL_INTENTS = {
 }
 
 
-# Fix 2 of the NLP-vs-Gemini collision fix (see use_nlp_lane): thresholds
-# for the almanac-overlap tie-break.
-#
-# ALMANAC_STRONG_MATCH_SCORE: how many overlapping content words with the
-# single best-matching almanac section counts as "this is clearly about
-# real almanac content", not a coincidental one-word overlap. 2 was picked
-# by checking it against the real almanac: e.g. "teachers day" scores 2
-# against the "Teacher's Day: 5th September 2026" section (both "teachers"
-# and "day" appear there) - a single stray word overlap (score 1) is too
-# weak on its own to override a genuine NLP match, but this is not.
-#
-# A WEAK NLP match (score < NLP_PHRASE_MATCH_SCORE) means the winning
-# intent scored purely from bare keyword(s), never phrase text - matches
-# nlp_helpers.score_intent()'s +3-per-phrase / +1-per-keyword scoring, so
-# any score under 3 is keyword-only by construction.
+# Thresholds for the almanac-overlap tie-break (see _nlp_lane_decision).
+# ALMANAC_STRONG_MATCH_SCORE=2 was picked against real almanac content:
+# "teachers day" scores 2 against the "Teacher's Day" section (both
+# "teachers" and "day" match) - a single stray word (score 1) is too weak
+# to override a genuine NLP match, but 2 isn't. NLP_PHRASE_MATCH_SCORE=3
+# matches nlp_helpers.score_intent()'s +3-per-phrase scoring, so anything
+# under 3 is keyword-only by construction.
 ALMANAC_STRONG_MATCH_SCORE = 2
 NLP_PHRASE_MATCH_SCORE = 3
 
 
 def use_nlp_lane(question, role):
     """
-    Pick which lane answers this question.
-
-    True  -> Lane 1: NLP + MySQL (personal data / school records)
-    False -> Lane 2: Gemini + almanac (general school knowledge)
-
-    NLP-FIRST routing: after the pure-greeting shortcut and the
-    general-knowledge check below, ask NLP directly whether it recognizes
-    the question as one of ITS OWN intents for this role, and trust that
-    over guessing from pronouns/wording.
-
-    This replaces the old approach for non-DB-first roles (students), which
-    gated ENTIRELY on PERSONAL_SIGNALS (pronouns like "my"/"I") before ever
-    consulting NLP. That caused real, confirmed failures: "mondays periods"
-    and "time table?" have no first-person wording at all, so they were sent
-    straight to Gemini - which correctly says it doesn't have that info,
-    since it's not general knowledge - even though NLP already knows how to
-    answer day-specific timetable questions (confirmed working when the same
-    question was phrased with "I", e.g. "what do I have at 5th period on
-    monday?"). Now NLP gets asked directly regardless of phrasing, and only
-    a genuine "no matching intent" falls through toward Gemini.
-
-    The general-knowledge check has to run BEFORE the NLP-first check, for
-    every role, not just teachers/principals: without it, a question like
-    "when is the exam schedule for grade 9" would score against NLP's
-    timetable intent (keyword "schedule") and incorrectly return the
-    ASKER's own timetable instead of being forwarded to the almanac. The
-    pronoun check below runs first specifically to protect genuinely
-    personal phrasing that happens to overlap a general-knowledge phrase -
-    e.g. "what's my exam schedule" contains the general-knowledge phrase
-    "exam schedule", so without checking pronouns first it would wrongly
-    be classified as a general question.
-
-    Teachers and principals never used PERSONAL_SIGNALS at all (their
-    questions are almost never worded in the first person), so that check
-    is skipped for them. If NLP finds no matching intent for them at all,
-    they still default to the NLP lane - UNLESS the almanac tie-break below
-    finds strong evidence otherwise, in which case Gemini wins directly
-    instead of wasting a round-trip through a guaranteed NLP miss (the
-    existing NLP-miss fallback in the /api/chat route would have forwarded
-    it to Gemini anyway, one step later).
-
-    SYSTEMIC collision fix (this is the second of two fixes for a recurring
-    bug category - "exam schedule" vs. timetable, then "teachers day" vs.
-    subject_teacher/total_teachers - a single ambiguous English word shared
-    between a personal-data intent's keywords and real almanac content):
-
-    Fix 1 lives in nlp_helpers.py itself: score_intent() no longer awards a
-    point for a bare AMBIGUOUS_KEYWORDS match with no phrase match and no
-    first-person wording in the question - "teachers day" no longer scores
-    anything for subject_teacher/total_teachers at all, one level below
-    this function.
-
-    Fix 2 is here: even when NLP DOES still find a match, if it's a WEAK one
-    (keyword-only, no phrase - score < NLP_PHRASE_MATCH_SCORE) and the
-    question ALSO scores a STRONG match against real almanac content
-    (>= ALMANAC_STRONG_MATCH_SCORE, and at least as strong as the NLP
-    score), Gemini wins the tie. The same almanac check also covers a plain
-    NLP miss (no intent at all) for DB-first roles, which otherwise default
-    straight to the NLP lane regardless - a strong almanac match there is
-    good evidence the question was never a DB question to begin with.
-
-    This is what makes the fix self-maintaining: it doesn't matter whether
-    the colliding word was audited into AMBIGUOUS_KEYWORDS or not, and it
-    doesn't matter whether the almanac content is an event nlp_helpers.py
-    has ever heard of - ANY future almanac addition ("Founders' Day",
-    "Alumni Meet", whatever) is automatically protected, because this
-    checks against the almanac's actual current content, not a hardcoded
-    list of known event names. A weak or missing NLP match becomes Gemini's
-    problem, and Gemini's "I don't have that information" fallback is a
-    safer failure mode than a wrong personal-data-flavored non-answer.
+    True routes to the NLP lane, False means Gemini or the classifier gets
+    a turn. Plain-bool wrapper around _nlp_lane_decision() - see its
+    docstring for the full routing rationale (the AMBIGUOUS_KEYWORDS
+    collision fix, the almanac tie-break, the classifier's trigger rule).
     """
     return _nlp_lane_decision(question, role)[0]
 
@@ -299,61 +195,48 @@ def get_routing_decision(question, role):
 def _nlp_lane_decision(question, role):
     """
     Core three-way routing decision behind use_nlp_lane() (plain bool) and
-    get_routing_decision() (the full picture) - one implementation so they
-    can never drift apart.
+    get_routing_decision() (the full tuple) - one implementation so they
+    can't drift apart.
 
     Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
     nlp_score: int).
 
-    NLP-FIRST routing: after the pure-greeting shortcut, ask NLP directly
-    whether it recognizes the question as one of ITS OWN intents for this
-    role, and trust a confident (phrase-backed) match outright.
+    Asks NLP directly whether it recognizes the question as one of its own
+    intents for this role, rather than gating on PERSONAL_SIGNALS pronouns
+    first - that missed pronoun-free personal questions like "mondays
+    periods". The general-knowledge check is skipped for personal-pronoun'd
+    wording, so "what's my exam schedule" isn't misclassified as general
+    knowledge just because it contains the phrase "exam schedule".
 
-    The general-knowledge check is skipped for personal-pronoun'd wording
-    (checked first, same as before) - without this, "what's my exam
-    schedule" would be misclassified as general knowledge purely because it
-    contains the general-knowledge phrase "exam schedule".
+    Two-part fix for a recurring collision ("exam schedule" vs. timetable,
+    "teachers day" vs. subject_teacher - an ambiguous word shared between a
+    personal intent's keywords and real almanac content): nlp_helpers.py's
+    score_intent() won't award a point for a bare AMBIGUOUS_KEYWORDS match
+    with no phrase and no personal signal. Here, even when NLP still finds
+    a weak (keyword-only) match, a STRONG competing almanac match (>=
+    ALMANAC_STRONG_MATCH_SCORE, >= the NLP score) wins the tie - checked
+    against the almanac's actual current content, so a future addition
+    ("Founders' Day") is automatically protected with no code change.
 
-    THE CLASSIFIER'S TRIGGER RULE (revised - see the real gap found via
-    live testing, described below): try_classifier is True whenever NEITHER
-    lane is confident - NLP's best score is zero or weak (no phrase match)
-    AND the almanac has no strong competing match either. It is the
-    genuine last line of defense before the generic Gemini "I don't have
-    that information" fallback, not a narrow edge-case patch. It is False
-    whenever EITHER lane already is confident (a phrase-backed NLP match,
-    a real-but-weak NLP match with no almanac competition, or a strong
-    almanac match on its own) - those already resolve correctly for free,
-    so spending an extra Groq call on them would only add cost/latency for
-    zero benefit, breaking the deliberately cost-conscious design.
+    CLASSIFIER TRIGGER: try_classifier is True only when NEITHER lane is
+    confident - NLP's score is zero or weak AND the almanac has no strong
+    competing match. Real gap fixed here: the original version only set
+    try_classifier on a weak-but-NONZERO score, skipping genuine zeros by
+    design - but testing showed the most common real failure mode is
+    exactly a genuine zero. "whats todays timetable" scores a TRUE ZERO,
+    not weak-nonzero: "timetable" is AMBIGUOUS_KEYWORDS-blocked with no
+    phrase and no personal-pronoun wording, so score_intent() discards it
+    entirely. This revision treats zero and weak the same way for
+    eligibility, while still requiring the almanac to also not be
+    confident - keeps the cost-conscious "only genuinely uncertain
+    questions get an extra Groq call" design.
 
-    Real gap this revision fixes: the ORIGINAL version of this function
-    only ever set try_classifier when NLP's score was weak-but-NONZERO
-    (lost the almanac tie-break) - a genuine zero score skipped the
-    classifier entirely by design. Real testing showed this missed the
-    single most common real failure mode: casual, pronoun-free phrasing
-    like "whats todays timetable"/"whats todays classes" scores a TRUE
-    ZERO, not weak-nonzero - "timetable"/"classes" are both in
-    AMBIGUOUS_KEYWORDS (nlp_helpers.py), so a bare keyword match with no
-    phrase and no personal-pronoun wording is silently discarded entirely,
-    not even weakly, by score_intent() itself. Those questions never
-    reached the classifier at all under the old rule and fell straight
-    through to Gemini's generic fallback. This revision treats "zero" and
-    "weak" the same way for classifier eligibility - both mean "NLP isn't
-    confident" - while still requiring the almanac to ALSO not be
-    confident, preserving the cost-conscious "only genuinely uncertain
-    cases" design the classifier was always meant to have.
-
-    Personal-pronoun'd wording with a real (even weak) NLP match is still
-    trusted outright without involving the almanac or the classifier at
-    all - unchanged from before, matches confirmed-working behavior (e.g.
-    "how many days was I absent" -> weak attendance match, correctly
-    answered today). A personal-pronoun'd question that finds NOTHING at
-    all (genuine zero) now falls into the same "neither lane confident"
-    check as pronoun-free questions, rather than taking a doomed detour
-    through the plain NLP lane first (which would just fail again inside
-    answer_student() and fall through to Gemini one step later anyway) -
-    this converges every role's genuine-zero-score handling onto one
-    consistent path instead of two slightly different ones.
+    Personal-pronoun'd wording with any real (even weak) NLP match is still
+    trusted outright, unchanged (e.g. "how many days was I absent" -> weak
+    attendance match, answered correctly today). A pronoun'd question that
+    finds NOTHING now goes through the same "neither lane confident" check
+    as pronoun-free ones, instead of a doomed detour through the NLP lane
+    first that would just fail again and reach Gemini one step later anyway.
     """
     if is_pure_greeting(question):
         return True, False, None, 0
@@ -638,7 +521,6 @@ def login():
         return jsonify({"success": False, "error": "Could not load profile."})
     display_name, profile = built
 
-    # Store in session
     session["user_id"] = user_id
     session["role"] = role
     session["linked_id"] = linked_id
@@ -724,12 +606,9 @@ def chat():
         # to Gemini as a last resort. The answer is now genuinely coming
         # from Gemini, so it streams too, same as the general lane below.
         if "didn't quite get" in reply or "didn't understand" in reply:
-            # Plain ASCII "->" deliberately, not "→": this print() crashes
-            # with UnicodeEncodeError on Windows whenever stdout isn't
-            # forced to UTF-8 (the OS default is cp1252), which would take
-            # down every NLP-miss request with an unhandled 500. Found via
-            # real testing, not theoretical - reproduced it while verifying
-            # streaming.
+            # Plain ASCII "->", not "→" - the unicode arrow crashes this
+            # print() with UnicodeEncodeError on Windows (stdout defaults
+            # to cp1252), which took down every NLP-miss request with a 500.
             print(f'[NLP MISS -> GEMINI FALLBACK] Question: {question_lower}')
             return stream_gemini_reply(question_lower)
 
@@ -779,17 +658,13 @@ def chat():
 
 def stream_gemini_reply(question):
     """
-    Wraps gemini_answer_stream() as a Server-Sent-Events HTTP response, so
-    static/app.js can read chunks incrementally via a ReadableStream reader
-    instead of waiting for the whole reply the way the NLP lane's plain
-    JSON response does.
+    Wraps gemini_answer_stream() as an SSE response so app.js can read
+    chunks incrementally instead of waiting for the whole reply.
 
-    Each chunk is sent as its own "data: {...}\\n\\n" line (SSE framing);
-    the chunk text is JSON-encoded so a chunk containing a literal newline
-    can't be mistaken for the blank-line message separator. A final
-    "data: [DONE]\\n\\n" marks the end of the stream so app.js knows to stop
-    reading (it also ends naturally when the connection closes, but this
-    makes that explicit rather than relying on it).
+    Each chunk ships as its own "data: {...}\\n\\n" line, JSON-encoded so a
+    literal newline in the text can't be mistaken for the blank-line
+    separator. A final "data: [DONE]\\n\\n" makes the end explicit rather
+    than relying on the connection closing.
     """
     def generate():
         for chunk in gemini_answer_stream(question):
@@ -1353,16 +1228,10 @@ def handle_teacher_schedule_lookup(question):
 
 
 def handle_class_timetable_lookup(question):
-    """
-    Full (not just current-period) timetable for a specific class - all
-    periods, all days, or day-filtered if one is mentioned, via the same
-    extract_day_from_question() helper handle_teacher_schedule_lookup()
-    above uses. Distinct from handle_classroom_occupant() (who's teaching
-    THIS class right now, one live period only) - this is the general
-    "what does 10-A's week look like" question, same query/output shape as
-    handle_student_timetable()/handle_teacher_timetable(), just keyed by
-    class instead of student/teacher.
-    """
+    """Full (not current-period-only) timetable for a class, day-filterable.
+    Distinct from handle_classroom_occupant() (who's teaching THIS class
+    right now) - same shape as handle_student_timetable()/
+    handle_teacher_timetable(), just keyed by class."""
     cls = extract_class_from_question(question)
     if not cls:
         return "Which class's timetable would you like to see? Please include the class (e.g. 10-A)."
@@ -1433,15 +1302,10 @@ def handle_school_wide_subject_teacher(question):
 
 
 def handle_class_teacher_lookup(question):
-    """
-    Every subject-teacher pair assigned to a specific class - "Class 10-A:
-    Mathematics — Mr. X, Science — Ms. Y". Distinct from
-    handle_classroom_occupant() (who's in THIS class right now, one live
-    period, one subject) and from handle_school_wide_subject_teacher()
-    (which teacher(s) teach a given SUBJECT school-wide, not a class's full
-    roster) - this is the general "who are 10-A's teachers" question,
-    independent of the current time/period.
-    """
+    """Every subject-teacher pair for a class - "Class 10-A: Mathematics
+    — Mr. X, Science — Ms. Y". Distinct from handle_classroom_occupant()
+    (who's in THIS class right now) and handle_school_wide_subject_teacher()
+    (which teacher teaches a SUBJECT school-wide, not a class's roster)."""
     cls = extract_class_from_question(question)
     if not cls:
         return "Which class would you like to check? Please include the class (e.g. 10-A)."
@@ -1521,12 +1385,9 @@ def handle_teacher_count_by_subject(question):
 # NLP ANSWER FUNCTIONS
 # =========================================================
 def answer_student(question, student_id, forced_intent=None):
-    # forced_intent: set by the classifier lane in /api/chat when it already
-    # decided which intent this is (see classify_personal_intent() in
-    # gemini_rag.py) - skips detect_intent()'s keyword scoring entirely and
-    # goes straight into the same dispatch below, so there's exactly one
-    # place that knows how to actually answer each intent regardless of
-    # which routing path decided on it.
+    # forced_intent: set by the classifier lane when it already picked the
+    # intent (see classify_personal_intent() in gemini_rag.py) - skips
+    # detect_intent() and goes straight into the same dispatch below.
     intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
@@ -1625,11 +1486,8 @@ def answer_teacher(question, teacher_id, forced_intent=None):
                 "📢 **Notices** — *'any announcements'*")
 
     if intent == "period_count":
-        # period_count's own phrase list includes "periods today" - without
-        # this, a question containing "today" (or an explicit day name) was
-        # silently answered with the WEEKLY total instead. Filtering only
-        # kicks in when a day is actually mentioned; with none, this stays
-        # the exact same weekly-total query/wording as before.
+        # "periods today" is one of this intent's own phrases, so without
+        # a day filter it was silently answering with the WEEKLY total.
         day = extract_day_from_question(question)
         if day:
             result = query(
@@ -1686,15 +1544,11 @@ def answer_principal(question, forced_intent=None):
     intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help",
-         # Newer/more specific intents listed before their more generic
-         # existing counterparts: detect_intent() keeps whichever intent it
-         # checks FIRST on an exact score tie, and "how many teachers teach
-         # math" ties 4-4 between total_teachers and teacher_count_by_subject
-         # (both get a phrase match + one keyword hit). Checking the
-         # subject-specific one first makes it win that tie, while a plain
-         # "how many teachers" still resolves to total_teachers on its own
-         # merits regardless of order (it scores 4 there vs 1) - verified
-         # both cases against real input before wiring this in.
+         # More specific intents listed first: detect_intent() keeps
+         # whichever wins a tie by being checked FIRST, and "how many
+         # teachers teach math" ties 4-4 between total_teachers and
+         # teacher_count_by_subject. A plain "how many teachers" still
+         # resolves to total_teachers on its own merits either way (4 vs 1).
          "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
          "teacher_location", "classroom_occupant", "free_teachers",
          "teacher_schedule_lookup", "class_timetable_lookup",
@@ -1702,21 +1556,15 @@ def answer_principal(question, forced_intent=None):
          "low_attendance_count", "pending_fees_count", "notices"]
     )
 
-    # Real collision found while adding class_timetable_lookup/
-    # class_teacher_lookup (see nlp_helpers.py's INTENT_DATA comments for
-    # both): teacher_schedule_lookup's "schedule for" and school_wide_
-    # subject_teacher's "who teaches" phrases are broad enough to ALSO
-    # phrase-match a class-code question with no named teacher/subject at
-    # all ("schedule for 10a", "who teaches 10a") - phrase matching is a
-    # literal substring check, so it genuinely cannot tell "schedule for
-    # <TEACHER NAME>" apart from "schedule for <CLASS CODE>" on its own.
-    # Redirect to the class-scoped intent specifically when a class code IS
-    # present AND no real named teacher/subject can be extracted from the
-    # question - that combination means the narrower, named-entity intent's
-    # own handler would have had nothing to work with anyway, so the
-    # class-scoped reading is the only one that can actually answer it.
-    # forced_intent (from the classifier lane) is never touched here - the
-    # classifier already makes this exact distinction itself when asked.
+    # teacher_schedule_lookup's "schedule for" and school_wide_subject_
+    # teacher's "who teaches" phrases also match a class-code question
+    # with no named teacher/subject ("schedule for 10a") - phrase matching
+    # is a literal substring check, it can't tell "schedule for <TEACHER>"
+    # from "schedule for <CLASS CODE>" on its own. Redirect to the
+    # class-scoped intent when a class code is present but no real
+    # teacher/subject was extracted - the narrower intent's handler would
+    # have had nothing to work with anyway. Skipped for forced_intent -
+    # the classifier already makes this distinction itself.
     if forced_intent is None and extract_class_from_question(question):
         if intent == "teacher_schedule_lookup":
             teachers = query("SELECT teacher_id, name FROM teachers", fetch=True, many=True) or []

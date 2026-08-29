@@ -1,15 +1,11 @@
 """
 validators.py
 -------------
-All input validation functions used across the dashboard.
-Keeping them here means:
-- One place to update rules if they change
-- Same rules applied consistently everywhere
-- Easy to explain in viva: "I separated concerns - validation
-  logic lives in validators.py, not scattered through dashboard.py"
+Input validation for the dashboard forms, centralized so rules stay
+consistent instead of duplicated per form.
 
-Each function returns a tuple: (is_valid: bool, error_message: str)
-If valid, error_message is an empty string.
+Each function returns (is_valid: bool, error_message: str) - empty
+string when valid.
 """
 
 import re
@@ -81,12 +77,7 @@ def validate_attendance(attendance):
 
 
 def validate_username(username):
-    """
-    Username must:
-    - Be at least 4 characters
-    - Contain no spaces
-    - Only contain letters, numbers, underscores
-    """
+    """At least 4 characters, no spaces, letters/numbers/underscores only."""
     username = username.strip()
     if not username:
         return False, "Username cannot be empty."
@@ -137,19 +128,5 @@ def validate_classes_assigned(classes_str):
 
 
 def collect_errors(*validation_results):
-    """
-    Takes multiple (is_valid, error_message) tuples and returns
-    a flat list of all error messages where is_valid is False.
-    Useful for checking multiple fields at once before saving.
-
-    Example:
-        errors = collect_errors(
-            validate_name(name),
-            validate_contact(contact)
-        )
-        if errors:
-            for e in errors: st.error(e)
-        else:
-            # safe to save
-    """
+    """Flattens multiple (is_valid, error_message) tuples into just the error messages, for checking several fields before a save."""
     return [msg for valid, msg in validation_results if not valid and msg]

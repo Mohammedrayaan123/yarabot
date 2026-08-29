@@ -29,10 +29,8 @@ CONTRACTIONS = {
 # after with fuzzy typo-matching.
 INTENT_DATA = {
     "attendance": {
-        # Widened after research into real short-form/casual phrasing
-        # (attendance is consistently one of the top-asked categories in
-        # school chatbots) - "attendance %" and "check attendance" are
-        # typical terse phone-typed phrasings with no verb/pronoun at all.
+        # "attendance %" / "check attendance" etc. cover terse phone-typed
+        # phrasing with no verb or pronoun.
         "phrases": ["how many days present", "how many days absent", "attendance percentage",
                     "attendance %", "my attendance", "attendance status", "attendance record",
                     "check attendance", "how's my attendance"],
@@ -45,23 +43,15 @@ INTENT_DATA = {
         "keywords": ["exam", "exams", "test", "tests", "examination", "examinations", "quiz"],
     },
     "timetable": {
-        # "time table" (as two words) is a real gap: it doesn't literally
-        # contain "timetable" as one token, so it scored nothing before -
-        # confirmed via real user testing routing it to Gemini instead of NLP.
+        # "time table" as two words doesn't contain "timetable" as one
+        # token, so it scored nothing until added explicitly.
         #
-        # "todays"/"today's" pairs below: clean_question() only strips
-        # ?!., - it does NOT normalize apostrophes, and "todays" isn't a
-        # CONTRACTIONS entry either, so "todays timetable" and "today's
-        # timetable" are two genuinely different substrings after cleaning.
-        # Real gap found via testing: "whats todays timetable"/"whats
-        # todays classes" (the actual casual, no-apostrophe phrasing real
-        # students type) scored a GENUINE ZERO before this - "timetable"/
-        # "classes" are both in AMBIGUOUS_KEYWORDS, so a bare keyword match
-        # with no phrase and no personal_signal wording ("todays" isn't a
-        # first-person pronoun) was silently discarded entirely, not even
-        # weakly. Both spellings of every today's-schedule phrasing are
-        # listed explicitly so the common casual form is caught for free,
-        # instantly, without ever needing the classifier lane.
+        # Both "todays x" and "today's x" are listed: clean_question()
+        # doesn't normalize apostrophes and "todays" isn't a CONTRACTIONS
+        # entry, so they're different substrings after cleaning. Without
+        # both, "whats todays timetable" scored a genuine zero - "timetable"/
+        # "classes" are AMBIGUOUS_KEYWORDS, and "todays" isn't a personal
+        # pronoun, so the bare keyword match got silently discarded.
         "phrases": ["my timetable", "my schedule", "class schedule", "today's classes",
                     "todays classes", "time table", "class routine", "today's schedule",
                     "todays schedule", "today's timetable", "todays timetable",
@@ -118,8 +108,8 @@ INTENT_DATA = {
         "keywords": ["roll"],
     },
     "my_class": {
-        "phrases": ["what class am i in", "which class am i", "my class"],
-        "keywords": ["class"],
+        "phrases": ["what class am i in", "which class am i", "my class","which grade am i in"],
+        "keywords": ["class","grade"],
     },
     "next_period": {
         "phrases": ["next period", "next class", "what's next"],
@@ -143,31 +133,23 @@ INTENT_DATA = {
     "free_periods": {
         "phrases": ["free periods", "am i free", "do i have a free period",
                     "any free time"],
-        # "periods" added after live testing caught a real collision:
-        # "free periods today" tied 4-4 with period_count (its own phrase
-        # "periods today" is a literal substring match too), and list order
-        # would have silently picked period_count - answering with the
-        # WEEKLY total instead of what today's free periods actually are.
+        # "periods" keyword needed: "free periods today" was tying 4-4 with
+        # period_count (its "periods today" phrase also matches), and list
+        # order would silently pick period_count's weekly total instead.
         "keywords": ["free", "periods"],
     },
     "periods_remaining": {
-        # Several phrasings here beyond the terse "periods left", added
-        # after live testing: "how many periods do i have left" (arguably
-        # the more natural way to ask this) scored ZERO phrase match here
-        # (the inserted "do i have" breaks a literal substring match)
-        # while period_count's shorter "how many periods" phrase still hit
-        # as a prefix, letting the wrong intent win (4 vs 2).
+        # "how many periods do i have left" scored zero phrase match here
+        # (the inserted "do i have" breaks the substring), while
+        # period_count's shorter "how many periods" still matched as a
+        # prefix - letting period_count win with the wrong (weekly) answer.
+        # More phrasings added to close that gap.
         "phrases": ["periods left", "how many periods left", "periods remaining today",
                     "how many periods do i have left", "how many periods left today",
                     "how many more periods"],
-        # "periods" is deliberately included here, not just "remaining"/"left":
-        # without it, "how many periods left" ties 4-4 with the existing
-        # period_count intent (both score a phrase match + one keyword hit),
-        # and detect_intent's tie-break falls back to list order - fragile,
-        # and would silently answer with the WEEKLY total instead of TODAY'S
-        # remaining count. Adding "periods" gives this intent its own extra
-        # keyword point so it wins outright (5 vs 4) regardless of list
-        # order. Verified against real inputs before wiring this in.
+        # "periods" keyword needed for the same reason as free_periods above -
+        # without it this ties 4-4 with period_count and falls back to list
+        # order.
         "keywords": ["remaining", "left", "periods"],
     },
     "teacher_identity": {
@@ -193,18 +175,12 @@ INTENT_DATA = {
         "phrases": ["schedule for", "timetable for teacher"],
         "keywords": ["schedule"],
     },
-    # General (not live/current-period) timetable for a whole CLASS - "what's
-    # 10-A's week look like" - distinct from classroom_occupant (who's
-    # teaching THIS class right now, one live period) and from
-    # teacher_schedule_lookup (a specific named TEACHER's schedule, not a
-    # class's). "schedule for <class code>" (no "class" word at all, e.g.
-    # "schedule for 10a") genuinely can't be told apart from
+    # A class's general timetable - distinct from classroom_occupant (who's
+    # in THIS class right now) and teacher_schedule_lookup (a named
+    # teacher's schedule). "schedule for 10a" can't be told apart from
     # teacher_schedule_lookup's own "schedule for" phrase by substring
-    # matching alone - both are handled the same way: app.py's
-    # answer_principal() redirects a teacher_schedule_lookup match here
-    # when a class code is present but no real named teacher was found,
-    # since that means the narrower named-teacher intent's own handler
-    # would have had nothing to work with anyway.
+    # matching alone - app.py's answer_principal() redirects there when a
+    # class code is present but no named teacher was found in the question.
     "class_timetable_lookup": {
         "phrases": ["timetable for class", "schedule for class", "class timetable",
                     "class schedule", "class routine"],
@@ -215,17 +191,12 @@ INTENT_DATA = {
         "phrases": ["who teaches", "teacher for subject"],
         "keywords": ["teaches"],
     },
-    # ALL subject-teacher pairs for a whole CLASS - "who teaches 10-A" (every
-    # subject) - distinct from classroom_occupant (who's in THIS class right
-    # now, one live period, one subject) and from school_wide_subject_teacher
-    # (which teacher teaches a given SUBJECT school-wide, not a class's full
-    # roster). "who teaches <class code>" (e.g. "who teaches 10a") shares the
-    # exact same "who teaches" phrase as school_wide_subject_teacher with
-    # nothing else to distinguish "10a" from a subject name by substring
-    # matching alone - same redirect pattern as class_timetable_lookup
-    # above: app.py's answer_principal() redirects a school_wide_subject_
-    # teacher match here when a class code is present but no real subject
-    # name was found in the question.
+    # All subject-teacher pairs for a class - distinct from classroom_occupant
+    # (who's in THIS class right now) and school_wide_subject_teacher (which
+    # teacher teaches a SUBJECT school-wide). Shares "who teaches" with
+    # school_wide_subject_teacher with nothing to distinguish a class code
+    # from a subject name by substring alone - same redirect pattern as
+    # class_timetable_lookup above.
     "class_teacher_lookup": {
         "phrases": ["who teaches class", "teacher for class", "teachers for class",
                     "who is the teacher for class", "class teachers", "class teacher",
@@ -257,91 +228,53 @@ INTENT_DATA = {
 }
 
 
-# ---- Ambiguous keywords ----
-# Common English words that legitimately belong to a personal-data intent's
-# keyword list, but are ALSO plausible inside a general-knowledge/almanac
-# question ("teachers day", "exam week dates", "which classes are on
-# holiday"). Audited once across every intent in INTENT_DATA above (see the
-# project notes for the full per-intent breakdown, including keywords
-# considered and NOT flagged).
-#
-# A BARE match on one of these (no phrase match backing it up, no personal
-# pronoun anywhere in the question) is not enough on its own to claim a
-# question for NLP - see score_intent() below. This is a ONE-TIME structural
-# tightening of the scoring rules, not a per-incident patch list: it does
-# NOT need a new entry every time a new almanac event is added later (that
-# growing-list failure mode is exactly what use_nlp_lane()'s almanac-overlap
-# check in app.py exists to catch instead, automatically, with no code
-# change here at all).
+# Words that legitimately belong to a personal-data intent's keyword list
+# but also show up in general almanac content ("teachers day", "exam week
+# dates", "which classes are on holiday"). A bare match on one of these
+# with no phrase match and no personal pronoun doesn't score - see
+# score_intent() below. One-time audit, not a growing patch list: a new
+# almanac event doesn't need an entry here, app.py's almanac-overlap check
+# catches that automatically.
 AMBIGUOUS_KEYWORDS = {
-    # teacher/staff-related - collide with almanac event names ("Teacher's
-    # Day"), PTM content, staff lists
+    # collide with almanac event names ("Teacher's Day"), PTM content, staff lists
     "teacher", "teachers", "teach", "teaches", "teaching", "staff",
-    # exam-related - collide with the almanac's own exam calendar content
+    # collide with the almanac's own exam calendar content
     "exam", "exams", "test", "tests", "examination", "examinations",
-    # schedule/timetable-related - collide with exam schedules, PTM
-    # schedules, academic calendar content
+    # collide with exam/PTM schedules, academic calendar content
     "schedule", "timetable", "routine",
-    # class/grade-related - "class"/"classes" appears constantly in almanac
-    # text as a GRADE reference ("Classes I-III", "Class IX & XI"), not a
-    # personal "my class" reference. ("classwise" is NOT included here -
-    # see the "considered but not flagged" list below.)
+    # "class"/"classes" appears constantly as a GRADE reference ("Classes
+    # I-III"), not a personal "my class" reference
     "class", "classes",
-    # NOTE: "period"/"periods" was considered (a "period" can mean a general
-    # TIME PERIOD, e.g. "admission period") but checked against the real
-    # school_almanac.txt and found ZERO occurrences of either word anywhere
-    # in it - and tightening it broke a real, previously-confirmed-working
-    # case ("mondays periods" for a student, caught by live regression
-    # testing before this shipped). Left OFF the list: no real collision
-    # risk found, and it has a real cost. If a future almanac addition ever
-    # legitimately uses "period" in a way that collides, the almanac-overlap
-    # check (Fix 2, in app.py) is the intended safety net for exactly that -
-    # not tightening this list further on a hypothetical.
+    # "period"/"periods" considered but left off - zero occurrences in
+    # school_almanac.txt, and tightening it broke a real working case
+    # ("mondays periods" for a student). App.py's almanac-overlap check is
+    # the safety net if a future almanac addition ever does collide.
     #
-    # student-related - appears constantly as a generic almanac reference
-    # ("students of Grade IV-V...")
+    # appears constantly as a generic reference ("students of Grade IV-V...")
     "student", "students",
-    # attendance-related - "attendance policy"/"attendance requirement" is
-    # genuine almanac content, not only a personal record lookup
+    # "attendance policy"/"attendance requirement" is genuine almanac content
     "attendance", "present", "presence", "absent", "absentee",
-    # fee-related - "fee structure"/"fees" appears in general almanac
-    # policy content, not only a personal balance lookup
+    # "fee structure"/"fees" appears in general almanac policy content
     "fee", "fees", "due", "dues",
-    # identity-related - "name"/"who" are extremely common words that say
-    # nothing about personal vs. general on their own
+    # extremely common words that say nothing about personal vs. general
     "name", "who", "where",
-    # generic temporal/availability words - "next", "current", "free" etc.
-    # show up in countless general sentences ("next holiday", "current
-    # academic year", "free dress day")
+    # show up in countless general sentences ("next holiday", "free dress day")
     "next", "now", "current", "free", "available",
     "remaining", "left", "pending",
 }
-# NOTE (re-audit when the "notices" intent was added): "notice"/"notices"/
-# "announcement"/"announcements" are NOT in the set above. Checked against
-# school_almanac.txt directly - zero occurrences of either word anywhere in
-# it, so there's no almanac content for a bare keyword match to collide
-# with. Unlike "class"/"exam"/etc., notices content lives entirely in the
-# `notices` MySQL table, not the almanac file, so this intent doesn't need
-# the same protection the almanac-sourced intents do.
+# "notice"/"notices"/"announcement"/"announcements" are NOT in the set
+# above - zero occurrences in school_almanac.txt, and notices content lives
+# in the `notices` MySQL table, not the almanac file.
 
-# Words that ARE ambiguous in isolation as English words, but were checked
-# and NOT flagged, because their existing phrase lists (or the specific
-# intent they belong to) already make a bare match safe enough in practice:
-#   - "roll" (roll_number) - "roll number" is school-record-specific
-#     terminology; no plausible almanac sentence uses it generically.
-#   - "bunk"/"bunked" (attendance) - informal student slang, not almanac
-#     phrasing.
-#   - "breakdown"/"classwise" (class_wise_count) - not ambiguous; kept off
-#     the list deliberately (note: "classwise" bare could theoretically
-#     collide, but it's rare enough in real almanac prose that it's left
-#     alone rather than over-tightened).
-#   - "occupant" (classroom_occupant) - not a real English word almanac
-#     content would use.
-#   - "assigned" (classes_assigned) - not almanac phrasing.
-#   - "location" (teacher_location) - not almanac phrasing (the almanac has
-#     no building/room content).
-#   - "unpaid" (pending_fees_count) - specific enough to fee defaulting,
-#     not general almanac prose.
+# Ambiguous in isolation but not flagged - existing phrase lists already
+# make a bare match safe:
+#   - "roll" (roll_number) - school-record-specific, no almanac use
+#   - "bunk"/"bunked" (attendance) - informal slang, not almanac phrasing
+#   - "breakdown"/"classwise" (class_wise_count) - not almanac phrasing
+#   - "occupant" (classroom_occupant) - not a word almanac content would use
+#   - "assigned" (classes_assigned) - not almanac phrasing
+#   - "location" (teacher_location) - almanac has no building/room content
+#   - "unpaid" (pending_fees_count) - specific to fee defaulting
 
 
 # Bare personal-reference signal words - deliberately small and separate
@@ -368,34 +301,18 @@ _CLASS_CODE_RE = re.compile(r'\b\d{1,2}[\s-]?[a-z]\b')
 
 
 def has_class_code(cleaned_question):
-    """
-    True if a specific class code (e.g. "10-a"/"10a"/"10 a") is mentioned
-    anywhere in the question. A second, separate signal alongside
-    has_personal_signal() that can lift the AMBIGUOUS_KEYWORDS block in
-    score_intent() - a real class code is just as strong, unambiguous
-    evidence that a bare "class"/"teacher" keyword match is a genuine
-    question (not a coincidental almanac-flavored word) as first-person
-    wording is for personal-data intents. Opt-in per intent (see
-    INTENT_DATA's "class_code_bypass" flag) rather than universal, so this
-    only loosens the ambiguous-keyword guard for intents that are actually
-    ABOUT a specific class.
-    """
+    """True if a class code (e.g. "10-a"/"10a"/"10 a") is mentioned anywhere in the question."""
     return bool(_CLASS_CODE_RE.search(cleaned_question))
 
 
 def clean_question(question):
     """Lowercase, expand contractions, strip punctuation.
 
-    Uses word-boundary regex, not plain .replace(): a naive substring
-    replace of "im" -> "i am" corrupted any word CONTAINING "im" as a
-    substring - "timetable" became "ti ametable", along with "time",
-    "similar", "significant", "primary", "climate", etc. This had been
-    silently surviving only because the mangled "ametable" token still
-    happened to fuzzy-match the "timetable" keyword (0.82 similarity,
-    above the 0.75 cutoff) - a lucky accident, not something to rely on.
-    It broke for real once a new intent's phrase needed an exact substring
-    match instead of a keyword fuzzy-match. Found via testing, not
-    theoretical - reproduced and fixed before it could ship broken.
+    Word-boundary regex, not plain .replace(): a naive "im" -> "i am"
+    replace corrupted any word containing "im" as a substring - "timetable"
+    became "ti ametable". Was silently surviving because the mangled token
+    still fuzzy-matched "timetable" by luck, until a phrase needed an exact
+    substring match instead.
     """
     question = question.lower().strip()
     for contraction, expanded in CONTRACTIONS.items():
@@ -411,32 +328,20 @@ def tokenize(question):
 
 
 def score_intent(cleaned_question, words, intent_name, personal_signal, class_code_present=False):
-    """Return a score for how well the question matches one intent.
-    Higher score = stronger match. Phrase matches count more than
-    single-word matches, since phrases are more specific/reliable.
+    """
+    Score a question against one intent. Phrase matches outweigh single
+    keywords, since phrases are more specific.
 
-    personal_signal: whether the question refers to the asker in the first
-    person (see has_personal_signal()). A bare match on an AMBIGUOUS_KEYWORDS
-    word with no phrase match and no personal_signal is NOT awarded a point -
-    that combination is exactly the "teachers day"/"exam schedule" failure
-    mode: a single common word that also belongs to a real personal-data
-    intent, with nothing else backing up the guess. Non-ambiguous keywords
-    are unaffected and still score normally on their own, same as before.
-
-    class_code_present: whether a specific class code (see has_class_code())
-    is mentioned anywhere in the question - a second bypass alongside
-    personal_signal, but opt-in per intent via INTENT_DATA's
-    "class_code_bypass" flag rather than universal. Only intents genuinely
-    ABOUT a specific class (class_timetable_lookup, class_teacher_lookup)
-    set that flag - a class code appearing in an unrelated question must
-    not quietly loosen every other intent's ambiguous-keyword protection.
+    A bare AMBIGUOUS_KEYWORDS match with no phrase and no personal_signal
+    scores nothing - that's the "teachers day"/"exam schedule" failure
+    mode, a common word that also happens to belong to a personal intent.
+    class_code_present is the same kind of bypass, but opt-in per intent
+    (INTENT_DATA's class_code_bypass) so a stray class code elsewhere
+    doesn't loosen every intent's protection.
     """
     data = INTENT_DATA[intent_name]
     score = 0
 
-    # Phrase matches (checked against the whole cleaned question, not
-    # word by word) - these are strong signals, worth more points, and
-    # always count regardless of personal_signal/class_code_present.
     phrase_matched = False
     for phrase in data["phrases"]:
         if phrase in cleaned_question:

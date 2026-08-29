@@ -9,23 +9,16 @@ duplicate the database, it'll just make sure it exists).
 import mysql.connector
 from config import DB_CONFIG
 
-# ---- STEP 1: Connect to MySQL (not to a specific database yet) ----
-# We connect WITHOUT specifying a database first, since we're about to
-# create it. So we take our config but leave out the "database" part.
+# Connect without a database selected yet, since we're about to create it.
 connection_settings = {k: v for k, v in DB_CONFIG.items() if k != "database"}
 connection = mysql.connector.connect(**connection_settings)
 
 cursor = connection.cursor()
 
-# ---- STEP 2: Create the database if it doesn't already exist ----
 cursor.execute("CREATE DATABASE IF NOT EXISTS school_bot")
 print("Database 'school_bot' ready.")
 
-# ---- STEP 3: Switch to using that database ----
 cursor.execute("USE school_bot")
-
-# ---- STEP 4: Create all the tables ----
-# Each CREATE TABLE IF NOT EXISTS means: only create it if it's not already there.
 
 tables = {}
 
@@ -128,9 +121,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """
 
-# Run each CREATE TABLE statement, in order (order matters because of
-# foreign keys — e.g. 'timetable' refers to 'teachers' and 'subjects',
-# so those must exist first)
+# FK order: timetable references subjects/teachers, so those go first.
 creation_order = ["subjects", "teachers", "students", "timetable", "exams", "notes", "notices",
                    "unanswered_questions", "users"]
 
@@ -138,7 +129,6 @@ for table_name in creation_order:
     cursor.execute(tables[table_name])
     print(f"Table '{table_name}' ready.")
 
-# ---- STEP 5: Save changes and close ----
 connection.commit()
 cursor.close()
 connection.close()

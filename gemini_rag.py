@@ -33,20 +33,11 @@ def load_almanac(path='school_almanac.txt'):
         return ''
 
 
-# ---------------------------------------------------------------
-# Auto-reloading almanac cache.
-#
-# The dashboard now has a self-service "Almanac" editor (a textarea over
-# this same file) meant for non-technical staff - it has to take effect
-# immediately, since nobody running that page should need to know "someone
-# has to restart the Flask server" is even a step. Re-reading the file on
-# EVERY question would work too, but almanac_top_score() below is called on
-# nearly every chat message (including most NLP-lane ones, as app.py's
-# use_nlp_lane() tie-break), so that would mean a disk read per message for
-# a value that in practice changes a few times a year. Caching by mtime
-# gets the same "always current" behavior for free, at the cost of one
-# cheap os.path.getmtime() stat call per question instead.
-# ---------------------------------------------------------------
+# The dashboard's Almanac editor writes this file directly and needs
+# changes to take effect without a Flask restart. Re-reading on every
+# question would work but almanac_top_score() runs on nearly every chat
+# message (including the NLP-lane tie-break), so we cache by mtime instead -
+# a cheap stat call per question instead of a full read.
 ALMANAC_PATH = 'school_almanac.txt'
 _almanac_cache = {'content': load_almanac(ALMANAC_PATH), 'mtime': None}
 try:
@@ -92,27 +83,19 @@ def _score_almanac_sections(question):
     Returns a list of (score, section) tuples, highest score first. Empty
     list if the almanac is missing or nothing scores.
 
-    Three robustness fixes here, all found from real queries that failed:
-    - Strips trailing punctuation from question words before matching, so
-      "12th?" matches "12th" instead of failing on the leftover "?".
-    - Also checks a whitespace-stripped copy of each section, so a
-      squished-together word like "sharktank" still matches an almanac
-      entry written as two separate words ("Shark Tank").
-    - Also strips apostrophes from both sides before matching, so "when is
-      teachers day" (how anyone actually types it) matches an almanac
-      section written with the grammatically-correct possessive
-      "Teacher's Day" - "teachers" and "teacher's" don't share a substring
-      otherwise (the apostrophe sits between "teacher" and "s"), which was
-      silently starving this exact section of its rightful match score.
+    Three fixes found from real queries that failed: strips trailing
+    punctuation ("12th?" still matches "12th"); also checks a
+    whitespace-stripped copy of each section, so "sharktank" matches
+    "Shark Tank"; strips apostrophes from both sides, so "teachers day"
+    matches the almanac's "Teacher's Day" (otherwise they don't share a
+    substring).
     """
     almanac = get_almanac()
     if not almanac:
         return []
 
-    # Split into sections by double newline
     sections = [s.strip() for s in almanac.split('\n\n') if s.strip()]
 
-    # Remove common stopwords before scoring
     stopwords = {'what', 'when', 'where', 'how', 'is', 'are', 'the',
                  'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
                  'can', 'you', 'tell', 'give', 'show'}
@@ -184,44 +167,27 @@ API_ERROR_MESSAGE = (
     "I'm having trouble connecting to my knowledge base right now. "
     "Please contact the school office for this information."
 )
-# Real gap found while wiring up Suggested Additions (log_unanswered_question()
-# below): NO_CONTEXT_MESSAGE is ONLY ever produced by the short-circuit "context
-# is completely empty" path (ask_gemini()/ask_groq() below, before Gemini is
-# even called) - it is NOT what a live Gemini/Groq call actually says when it
-# has SOME weak, irrelevant almanac context (e.g. a question like "does the
-# school have a swimming pool" scores >0 just from generic words like
-# "school") but genuinely can't answer from it. In that (far more common in
-# practice) case, the model instead follows _build_prompt()'s own instructed
-# refusal wording below - a DIFFERENT string. Named as its own constant, used
-# in the prompt template AND checked alongside NO_CONTEXT_MESSAGE wherever
-# "did Gemini draw a blank" is decided, so both real "no info" paths are
-# actually covered instead of only the rarer one.
+# NO_CONTEXT_MESSAGE only fires on the short-circuit "context is completely
+# empty" path, before Gemini is ever called. A live call with SOME weak,
+# irrelevant context (e.g. "does the school have a swimming pool" scores >0
+# just off the word "school") instead follows this instructed refusal
+# wording - the far more common real "no info" case. Checked alongside
+# NO_CONTEXT_MESSAGE wherever "did Gemini draw a blank" matters.
 GEMINI_DECLINED_PHRASE = "I don't have that information — please contact the school office directly."
 
 GEMINI_MODEL = 'gemini-3.5-flash-lite'
 
-# Groq fallback - kicks in automatically when Gemini specifically hits a
-# rate limit / quota error (not other kinds of failures). Groq's API is
-# OpenAI-compatible, so this uses the openai SDK pointed at Groq's endpoint
-# instead of a separate library.
-#
-# Model note: an earlier draft of this used 'llama-3.1-8b-instant', which
-# turned out to no longer exist on Groq's API (404 model_not_found) -
-# checked the live model list (client.models.list()) and picked
-# 'openai/gpt-oss-20b' as the closest equivalent: small and fast, good fit
-# for a fallback role. Same lesson learned twice already with Gemini model
-# names this project - verify against the live API, don't trust a model
-# string from memory or an old snippet.
+# Kicks in when Gemini hits a rate limit/quota error. Groq's API is
+# OpenAI-compatible, so we reuse the openai SDK pointed at its endpoint.
+# 'llama-3.1-8b-instant' (an earlier choice) went dead on Groq's API
+# (404 model_not_found) - verify against the live model list, don't trust
+# a model string from memory.
 GROQ_MODEL = 'openai/gpt-oss-20b'
 
-# Debug/testing flag - when on, both gemini_answer() and gemini_answer_stream()
-# skip Gemini entirely and go straight to Groq, so the Groq fallback path can
-# be exercised on demand instead of waiting for a real Gemini rate limit.
-# This is a SEPARATE early branch from the normal rate-limit fallback below -
-# it doesn't touch is_rate_limit_error() or the try/except that drives the
-# real fallback. Set FORCE_GROQ=true in .env to enable; see the matching
-# comment there. Read once at import time (like GEMINI_MODEL/GROQ_MODEL
-# above), not per-call - toggling it is meant to require a server restart.
+# Forces both gemini_answer() and gemini_answer_stream() through Groq
+# instead of Gemini, for testing the fallback path without a real rate
+# limit. Separate early branch, doesn't touch the real fallback logic.
+# Set FORCE_GROQ=true in .env - read once at import, so toggling needs a restart.
 FORCE_GROQ = os.getenv('FORCE_GROQ', 'false').strip().lower() == 'true'
 
 
@@ -265,12 +231,10 @@ def ask_groq(question, context):
         return NO_CONTEXT_MESSAGE
 
     try:
-        # Built fresh per call, same reasoning as ask_gemini()'s client:
-        # a module-level client constructed at import time would bake in
-        # whatever GROQ_API_KEY was (or wasn't) set at that moment, which
-        # can be wrong if this module is ever imported before load_dotenv()
-        # runs - already bit us once this project with a bare test script
-        # and GEMINI_API_KEY.
+        # Built fresh per call, not at module level - a client built at
+        # import time can bake in a missing GROQ_API_KEY if this module
+        # loads before load_dotenv() runs (bit us once already, with
+        # GEMINI_API_KEY in a bare test script).
         client = OpenAI(api_key=os.getenv('GROQ_API_KEY'), base_url='https://api.groq.com/openai/v1')
         response = client.chat.completions.create(
             model=GROQ_MODEL,
@@ -286,35 +250,27 @@ def ask_groq(question, context):
 
 # =========================================================
 # UNCERTAIN-MATCH CLASSIFIER
-# A middle step in app.py's routing pipeline, between "NLP tried and got a
-# weak/nonzero score" and "give up and route to Gemini/almanac" - see
-# get_weak_nlp_match()/_nlp_lane_decision() in app.py for exactly which
-# questions reach this. One more real chance to catch a personal-data
-# question phrased in a way nlp_helpers.py's keyword lists weren't
-# explicitly taught (e.g. "how many days was I absent" for attendance),
-# before falling through to the general-knowledge lane.
+# Last line of defense in app.py's routing pipeline - fires when NEITHER
+# the NLP lane nor the almanac is confident (see _nlp_lane_decision() in
+# app.py), one more chance to catch a personal-data question phrased in a
+# way nlp_helpers.py's keyword lists weren't taught, before falling
+# through to the generic Gemini fallback.
 # =========================================================
 def classify_personal_intent(question, role, possible_intents):
     """
-    Asks Groq to pick exactly one of possible_intents (the real,
-    role-specific list from app.py's ROLE_PERSONAL_INTENTS) for this
-    question, or NONE if it's general school information rather than
-    something personal to this user.
+    Asks Groq to pick exactly one of possible_intents (the role-specific
+    list from app.py's ROLE_PERSONAL_INTENTS), or NONE if it's general
+    school information rather than something personal to this user.
 
-    Privacy boundary: sends ONLY the question text, the role label, and the
-    intent NAMES - never any student/personal data (no attendance numbers,
-    grades, fee status, names). Same boundary as the existing Gemini/
-    almanac lane, which also only ever sees the question and almanac text.
+    Privacy boundary: sends only the question text, the role label, and the
+    intent names - never any student/personal data. Same boundary as the
+    Gemini/almanac lane.
 
-    Fails open, always: returns None (never raises) on a NONE response, an
-    unrecognized/malformed response, or any error at all (timeout, rate
-    limit, API failure). The caller's only contract with this function is
-    "a real intent name, or None" - None always means "fall through to the
-    normal Gemini/almanac lane, exactly as if this function didn't exist".
-    Given this project's repeated ambiguous-keyword routing bug class, an
-    AI classifier that's ALSO uncertain must never be allowed to force a
-    guess through - failing open here is as deliberate as the "nothing
-    auto-applies" rule on the Suggested Additions almanac review queue.
+    Fails open: returns None (never raises) on NONE, a malformed response,
+    or any error - always means "fall through to the normal Gemini/almanac
+    lane". A classifier that's also uncertain must never force a guess
+    through, same principle as Suggested Additions' "nothing auto-applies"
+    rule.
     """
     intent_list = "\n".join(f"- {name}" for name in possible_intents)
     prompt = f"""A {role} at a school is using a chatbot. Decide which ONE category their question belongs to.
@@ -333,20 +289,15 @@ Reply with ONLY the category name exactly as written above, or NONE. No explanat
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{'role': 'user', 'content': prompt}],
-            temperature=0,   # a classification pick, not creative writing - the same input should always get the same category
-            # Real bug found via live testing: GROQ_MODEL ('openai/gpt-oss-20b')
-            # is a reasoning model that emits its chain-of-thought as part of
-            # the same token budget max_tokens caps - a tight cap here (originally
-            # 20, sized for "a bare category name is a few tokens") let the
-            # reasoning alone exhaust the whole budget before any visible answer
-            # token came out, so `content` came back '' on EVERY real call, which
-            # this function's own fail-open design silently swallowed as "no
-            # match" - it looked like it was working (always failing open with no
-            # error) while never actually classifying anything. Confirmed by
-            # inspecting response.choices[0].message.reasoning directly: real,
-            # correct reasoning ("periods still to go... matches
-            # periods_remaining") was being generated and then thrown away.
-            # 300 is generous enough for this reasoning + a one-word answer.
+            temperature=0,   # classification, not creative writing - same input should always get the same category
+            # GROQ_MODEL is a reasoning model - its chain-of-thought counts
+            # against max_tokens too. A tight cap here (originally 20) let
+            # the reasoning alone exhaust the budget before any visible
+            # answer came out, so content was '' on every call and the
+            # fail-open path silently swallowed it as "no match" - looked
+            # like it worked, never actually classified anything. Confirmed
+            # via response.choices[0].message.reasoning. 300 covers the
+            # reasoning plus a one-word answer.
             max_tokens=300,
         )
         raw_answer = response.choices[0].message.content.strip()
@@ -499,35 +450,26 @@ def find_cached_answer(normalized_question):
 
 
 # These three must never be cached. NO_CONTEXT_MESSAGE/API_ERROR_MESSAGE:
-# caching a transient failure - we've hit a real 503 from Gemini in testing -
+# caching a transient failure (a real 503 from Gemini, seen in testing)
 # would serve "contact the office" to every similar question for the full
-# CACHE_TTL_SECONDS even after Gemini recovers seconds later.
-# GEMINI_DECLINED_PHRASE has the same problem plus a second one specific to
-# Suggested Additions: caching it would (a) make find_cached_answer() serve
-# repeat askings straight from cache, skipping log_unanswered_question()
-# entirely, so ask_count could never actually go above 1, and (b) mean that
-# even after an admin adds the real answer to the almanac, anyone who already
-# triggered a cached refusal keeps getting that stale "I don't know" for up
-# to CACHE_TTL_SECONDS - defeating the "answerable immediately, no restart"
-# point of the feature for exactly the people who asked first.
+# TTL even after Gemini recovers. GEMINI_DECLINED_PHRASE has the same
+# problem plus a Suggested-Additions-specific one: caching it would skip
+# log_unanswered_question() on repeat askings (ask_count could never go
+# above 1), and keep serving early askers a stale refusal even after an
+# admin adds the real answer to the almanac.
 UNCACHEABLE_ANSWERS = {NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE, GEMINI_DECLINED_PHRASE}
 
 
 # =========================================================
 # SUGGESTED ADDITIONS
-# Tracks real content gaps - questions Gemini genuinely had no almanac
-# context for (NOT every Gemini-lane question, only ones that resolved to
-# NO_CONTEXT_MESSAGE - see the call sites in gemini_answer()/
-# gemini_answer_stream() below) - so the dashboard's "Suggested Additions"
-# page can surface them for a human admin to review.
+# Tracks real content gaps - questions that resolved to NO_CONTEXT_MESSAGE
+# or GEMINI_DECLINED_PHRASE (not every Gemini-lane question) - so the
+# dashboard's "Suggested Additions" page can surface them for review.
 #
-# Deliberately does NOT touch school_almanac.txt or any routing logic on
-# its own. Given this project's repeated ambiguous-keyword routing bug
-# class (AMBIGUOUS_KEYWORDS in nlp_helpers.py, [[project-yarabot-overview]]
-# Checkpoint 5), auto-applying anything here without a human reading it
-# first is exactly the kind of risk that bug class came from - every
-# addition to the almanac still requires an admin to type the actual
-# answer and click Add in the dashboard.
+# Deliberately never touches school_almanac.txt or routing logic on its
+# own - every addition still requires an admin to type the actual answer
+# and click Add in the dashboard, given this project's history of
+# ambiguous-keyword routing bugs from auto-applying changes.
 # =========================================================
 def log_unanswered_question(question):
     """
@@ -609,7 +551,6 @@ def gemini_answer(question):
     """
     normalized = normalize_question(question)
 
-    # Check cache first
     cached = find_cached_answer(normalized)
     if cached:
         return cached
@@ -655,47 +596,21 @@ def gemini_answer(question):
 
 def gemini_answer_stream(question):
     """
-    Streaming twin of gemini_answer(), used by app.py's /api/chat route for
-    the Gemini lane. Same cache-first behavior:
+    Streaming twin of gemini_answer(), used by app.py's /api/chat route.
 
-    - Cache hit  -> yields the cached answer as a single chunk, instantly,
-      no API call. This keeps the response shape consistent for app.js -
-      every Gemini-lane reply arrives as a stream of 1+ chunks, whether or
-      not it actually streamed from the API - the caller never needs to
-      special-case a cache hit.
-    - No almanac match -> yields NO_CONTEXT_MESSAGE as a single chunk, no
-      API call (same short-circuit as gemini_answer()/ask_gemini()).
-    - Cache miss with context -> streams real chunks from the Gemini API as
-      they arrive, accumulating the full text, then caches the assembled
-      answer once streaming completes (skipping the cache if the assembled
-      answer is empty or happens to equal one of the uncacheable fallback
-      messages, same rule as gemini_answer()).
+    Cache hit and no-almanac-match both yield a single chunk with no API
+    call, so app.js always sees a stream of 1+ chunks regardless of whether
+    the reply actually streamed. A cache miss with context streams real
+    Gemini chunks and caches the assembled answer once done.
 
-    A network/API error mid-stream is handled the same way ask_gemini()
-    handles a failure before ever starting a response: yield
-    API_ERROR_MESSAGE and don't cache it. If the error happens AFTER some
-    real chunks already streamed to the browser, the partial answer stays
-    on screen and the error message is appended after it - still better
-    than silently cutting the user off with nothing.
-
-    Rate-limit fallback: if Gemini is specifically rate-limited (whether
-    that happens before any text streamed, or partway through), Groq
-    answers instead - as ONE chunk, not streamed itself (that can be added
-    later the same way Gemini's streaming was). If Gemini had already
-    streamed some real text before rate-limiting mid-response (rare - a
-    429 almost always happens up front, before any chunk arrives), the
-    Groq answer is appended as a further chunk rather than replacing what
-    already reached the browser - there's no way to retract bytes already
-    sent over an SSE stream.
-
-    If FORCE_GROQ is on, Gemini is skipped entirely and Groq answers every
-    time, sent as a single chunk (same shape as the rate-limit-fallback
-    case above) - a separate debug branch, not a change to the fallback
-    logic itself.
+    A mid-stream error yields API_ERROR_MESSAGE uncached - if real chunks
+    already reached the browser, they stay and the error is appended after
+    rather than replacing them (an SSE stream can't retract bytes already
+    sent). A rate limit mid-stream falls back to Groq as one appended
+    chunk, same reasoning. FORCE_GROQ skips Gemini entirely, one chunk.
     """
     normalized = normalize_question(question)
 
-    # Check cache first
     cached = find_cached_answer(normalized)
     if cached:
         yield cached

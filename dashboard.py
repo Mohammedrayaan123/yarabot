@@ -1,20 +1,10 @@
 """
 dashboard.py
 ------------
-The school management dashboard - admin-only, protected by a login
-screen. Organized as separate "pages" using a sidebar menu.
+Admin-only school management dashboard, protected by a login screen.
+Organized as separate "pages" via a sidebar menu.
 
-WHAT'S NEW IN THIS VERSION:
-1. Login screen - only admins can access this dashboard now.
-2. Full Edit/Delete for Subjects, Timetable, and Exams (previously
-   only Students and Teachers had this).
-3. Graceful error handling - if the database connection fails, you
-   get a clear message instead of a scary crash screen.
-4. Basic input validation - e.g. contact numbers must be 10 digits.
-5. A little visual polish.
-
-To run this file:
-    streamlit run dashboard.py
+Run: streamlit run dashboard.py
 """
 
 import os
@@ -32,10 +22,8 @@ from validators import (
     validate_classes_assigned, collect_errors
 )
 
-# ---- Page setup ----
 st.set_page_config(page_title="School Dashboard", page_icon="🏫", layout="wide")
 
-# A little bit of visual polish - custom styling for headers and buttons
 st.markdown("""
 <style>
 h1 { color: #2c3e50; }
@@ -45,7 +33,6 @@ div.stButton button, div.stFormSubmitButton button { border-radius: 6px; }
 """, unsafe_allow_html=True)
 
 
-# ---- Helper function: connect to our database, with graceful error handling ----
 def get_connection():
     try:
         return mysql.connector.connect(**DB_CONFIG)
@@ -58,13 +45,8 @@ def get_connection():
 
 
 def safe_query(query, params=None, fetch=False, many=False):
-    """
-    Runs a SQL query safely with error handling built in.
-    - fetch=True  → returns rows (for SELECT)
-    - fetch=False → commits the change (for INSERT/UPDATE/DELETE)
-    - many=False  → single row; many=True → all rows
-    Returns None if something goes wrong (shows error to user).
-    """
+    """fetch=True for SELECT (many=True for all rows), fetch=False commits
+    an INSERT/UPDATE/DELETE. Returns None (and shows a Streamlit error) on failure."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -73,7 +55,7 @@ def safe_query(query, params=None, fetch=False, many=False):
             result = cursor.fetchall() if many else cursor.fetchone()
         else:
             conn.commit()
-            result = cursor.lastrowid  # useful for INSERT to get the new ID
+            result = cursor.lastrowid
         cursor.close()
         conn.close()
         return result
@@ -540,7 +522,6 @@ elif page == "Subjects":
 elif page == "Timetable":
     st.title("Timetable")
 
-    # Fetch subjects and teachers for the dropdowns
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT subject_id, subject_name, class FROM subjects")
@@ -1025,10 +1006,8 @@ elif page == "Notices":
                 cursor.execute(
                     """INSERT INTO notices (title, body, posted_by, date_posted)
                        VALUES (%s, %s, %s, %s)""",
-                    # posted_by=0: the dashboard admin login is a fixed env-var
-                    # credential, not a row in `users` - there's no real user_id
-                    # to reference here, so 0 is a sentinel for "posted via the
-                    # admin dashboard".
+                    # posted_by=0: dashboard admin isn't a row in `users`, so 0 is
+                    # a sentinel for "posted via the admin dashboard".
                     (notice_title.strip(), notice_body.strip(), 0, datetime.date.today())
                 )
                 conn.commit()
@@ -1116,20 +1095,15 @@ elif page == "Almanac":
 
 # =========================================================
 # PAGE: SUGGESTED ADDITIONS
-# Questions Nova (the Gemini lane) genuinely had no almanac context for -
-# see log_unanswered_question() in gemini_rag.py, which only logs a
-# question here when the final reply equalled NO_CONTEXT_MESSAGE exactly,
-# not every Gemini-lane question. Near-duplicate phrasings of the same
-# question are grouped into one row (ask_count) using the same
-# normalize_question() + word-overlap matching the response cache already
-# uses, at the same 0.85 similarity threshold.
+# Questions Nova genuinely had no almanac context for - see
+# log_unanswered_question() in gemini_rag.py. Near-duplicate phrasings
+# group into one row (ask_count) via the same word-overlap matching the
+# response cache uses.
 #
-# NOTHING here is ever applied automatically - every "Add to Almanac"
-# requires a human admin to type the actual answer and click Save. Given
-# this project's repeated ambiguous-keyword routing bugs
-# (AMBIGUOUS_KEYWORDS in nlp_helpers.py), auto-modifying almanac content or
-# routing without review is exactly the kind of risk that bug class came
-# from - this page is a review queue, not an auto-apply pipeline.
+# Nothing here applies automatically - every "Add to Almanac" requires a
+# human to type the answer and click Save. This is a review queue, not an
+# auto-apply pipeline, given this project's history of ambiguous-keyword
+# routing bugs.
 # =========================================================
 elif page == "Suggested Additions":
     st.title("💡 Suggested Additions")
