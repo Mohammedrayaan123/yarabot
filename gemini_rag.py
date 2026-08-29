@@ -72,6 +72,55 @@ def get_almanac():
     return _almanac_cache['content']
 
 
+# Grades run I-XII; questions naturally use Arabic numerals ("grade 5")
+# while almanac content uses Roman ("Grade V", or a table column like
+# "I-VII"). Plain word-overlap can't bridge that - "5" shares no
+# characters with "V", and even converting to Roman doesn't help against
+# a RANGE, since "I-VII" never spells out "V" as its own token even though
+# grade 5 is inside it. _section_covers_grade() below handles both forms.
+_ROMAN_GRADES = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
+_ROMAN_TO_GRADE = {roman: n + 1 for n, roman in enumerate(_ROMAN_GRADES)}
+
+_GRADE_NUMBER_RE = re.compile(
+    r'\b(?:grade|class|std\.?|standard)s?\s*(\d{1,2})\b'
+    r'|\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:grade|class)\b'
+)
+
+
+def _question_grade_number(cleaned_question):
+    """Pulls a 1-12 grade/class number out of e.g. "grade 5 fees" or "class 8 tuition". None otherwise."""
+    m = _GRADE_NUMBER_RE.search(cleaned_question)
+    if not m:
+        return None
+    n = int(m.group(1) or m.group(2))
+    return n if 1 <= n <= 12 else None
+
+
+def _section_covers_grade(section, grade_n):
+    """
+    True if `section` names grade_n as a Roman numeral - standalone
+    ("Grade V") or as one end of a hyphen/"to"-joined range ("I-VII",
+    "Grades IV to VIII"). Deliberately not treating "&"/"and" as a range
+    joiner - "Class IX & XI" (an admission cutoff-date section) means
+    those two grades specifically, not "IX through XI" inclusive of X.
+    """
+    matches = [m for m in re.finditer(r'\b[IVX]+\b', section) if m.group() in _ROMAN_TO_GRADE]
+    if not matches:
+        return False
+
+    values = [_ROMAN_TO_GRADE[m.group()] for m in matches]
+    if grade_n in values:
+        return True
+
+    for m1, m2 in zip(matches, matches[1:]):
+        between = section[m1.end():m2.start()]
+        if re.fullmatch(r'\s*(-|to)\s*', between, re.I):
+            lo, hi = sorted((_ROMAN_TO_GRADE[m1.group()], _ROMAN_TO_GRADE[m2.group()]))
+            if lo <= grade_n <= hi:
+                return True
+    return False
+
+
 def _score_almanac_sections(question):
     """
     Score every almanac section against a question by how many question
@@ -83,18 +132,23 @@ def _score_almanac_sections(question):
     Returns a list of (score, section) tuples, highest score first. Empty
     list if the almanac is missing or nothing scores.
 
-    Three fixes found from real queries that failed: strips trailing
+    Four fixes found from real queries that failed: strips trailing
     punctuation ("12th?" still matches "12th"); also checks a
     whitespace-stripped copy of each section, so "sharktank" matches
     "Shark Tank"; strips apostrophes from both sides, so "teachers day"
     matches the almanac's "Teacher's Day" (otherwise they don't share a
-    substring).
+    substring); splits sections on a regex, not a literal '\n\n' - a
+    blank line with a stray trailing space (' \r\n') broke the literal
+    match and collapsed the entire 291-line almanac into one section
+    after a dashboard paste. The dashboard's Almanac editor is a raw
+    textarea, so this has to tolerate whatever whitespace a future paste
+    leaves on its blank lines, not just today's file.
     """
     almanac = get_almanac()
     if not almanac:
         return []
 
-    sections = [s.strip() for s in almanac.split('\n\n') if s.strip()]
+    sections = [s.strip() for s in re.split(r'\n\s*\n', almanac) if s.strip()]
 
     stopwords = {'what', 'when', 'where', 'how', 'is', 'are', 'the',
                  'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
@@ -105,6 +159,13 @@ def _score_almanac_sections(question):
         cleaned_question = cleaned_question.replace(ch, '')
     cleaned_question = cleaned_question.replace("'", "").replace("’", "")
     question_words = set(cleaned_question.split()) - stopwords
+    grade_n = _question_grade_number(cleaned_question)
+    if grade_n is not None:
+        # Drop the bare digit ("5") from the generic word-overlap set - as a
+        # substring it matches any price, phone number, or time containing
+        # that digit (e.g. "6:55 AM"), drowning out _section_covers_grade's
+        # more precise signal below with noise from unrelated sections.
+        question_words.discard(str(grade_n))
 
     scored = []
     for section in sections:
@@ -114,6 +175,8 @@ def _score_almanac_sections(question):
             1 for word in question_words
             if word in section_lower or word in section_squished
         )
+        if grade_n and _section_covers_grade(section, grade_n):
+            score += 3
         if score > 0:
             scored.append((score, section))
 
@@ -132,9 +195,22 @@ def search_almanac(question):
     for genuinely unrelated questions instead of handing Gemini 2000
     irrelevant characters and spending a quota-limited API call asking it
     to guess anyway.
+
+    A question naming a specific grade ("grade 5 tuition") always pulls in
+    every section _section_covers_grade() matches for it, even past the
+    top 3 - the fee table's "I-VII"/"VIII-X" columns rarely share enough
+    plain vocabulary with the question to win the word-overlap ranking on
+    their own, so leaving this to score alone was still missing the table.
     """
     scored = _score_almanac_sections(question)
     top = [section for _, section in scored[:3]]
+
+    grade_n = _question_grade_number(question.lower())
+    if grade_n is not None:
+        for _, section in scored[3:]:
+            if section not in top and _section_covers_grade(section, grade_n):
+                top.append(section)
+
     return '\n\n'.join(top)
 
 

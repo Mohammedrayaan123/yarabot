@@ -290,5 +290,3 @@ A: Varies by grade — UKG tests English & Maths; higher grades add Hindi, a 3rd
 Q: What is the campus like?
 A: A custom 9,890 sq. metre campus with separate boys' and girls' blocks, science and computer labs, a library, dance/music rooms, health facilities, and a self-contained infirmary with a full-time nurse.
  
-Q:ask me 1234
-A:YOO WSSGUD MARIYA!

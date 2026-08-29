@@ -243,8 +243,10 @@ AMBIGUOUS_KEYWORDS = {
     # collide with exam/PTM schedules, academic calendar content
     "schedule", "timetable", "routine",
     # "class"/"classes" appears constantly as a GRADE reference ("Classes
-    # I-III"), not a personal "my class" reference
-    "class", "classes",
+    # I-III"), not a personal "my class" reference. Same for "grade" -
+    # "grade 5 fees"/"grade 5 tuition" is almanac content, not my_class's
+    # "which grade am i in" (that's a phrase match, unaffected by this).
+    "class", "classes", "grade", "grades",
     # "period"/"periods" considered but left off - zero occurrences in
     # school_almanac.txt, and tightening it broke a real working case
     # ("mondays periods" for a student). App.py's almanac-overlap check is
