@@ -64,20 +64,44 @@ const LOTTIE_VIEWBOX_CROPS = {
 
 // =========================================================
 // SPIDER-MAN EASTER EGG
-// Anchored to the wave emoji in the greeting name line ("[Name] 👋"),
-// which only exists on the pre-first-message greeting screen. See
+// Anchored to the persistent main chat area (#spiderman-lottie in
+// index.html, a direct child of the flex-1 main-content wrapper, NOT the
+// sidebar - centered over the chat content itself, roughly above the
+// greeting, same spot he occupied before this move). Mounts ONCE per
+// session, in showChatPage(), and stays active for the whole session -
+// including after messages are sent, unlike the old greeting-anchored
+// version, which tore down the instant the greeting was hidden. Only torn
+// down by an actual session boundary: handleSessionExpired() or
+// handleLogout(), never by sendMessage() or clearChat() anymore. See
 // initSpiderman()/teardownSpiderman() below for the full lifecycle.
 // =========================================================
 const SPIDERMAN_LOTTIE_URL = "/static/animation_spider.json";
 
-// Content bounds measured by rendering the file in lottie-web and reading
-// lottie.getRegisteredAnimations()[0].renderer.elements[i].finalTransform
-// at sampled frames (same technique as the chatbot.json crop fix - not
-// guessed): x spans 0-32, y spans -21 to 32 of the native 32x32 canvas.
-// The default "0 0 32 32" viewBox would clip everything above y=0, which
-// is where the character sits for almost the entire animation (he settles
-// at y=-21) - this crop is required for him to render at all, not cosmetic.
-const SPIDERMAN_VIEWBOX_CROP = "0 -21 32 53";
+// Content bounds - CORRECTED. The previous crop ("0 -21 32 53") used the
+// full native 0-32 canvas WIDTH, inherited from an early getBBox() sweep
+// that (as later analysis in this file established) wasn't a reliable way
+// to measure this particular file. Real bug this caused: it left the
+// character rendering at roughly 30% of the container's width - a visibly
+// tiny, easy-to-miss speck padded by empty crop space on both sides, not
+// an actually-invisible-to-the-DOM bug (mount/opacity/z-index were all
+// fine) but invisible in practice.
+//
+// Re-measured properly this time - read the exact SVG transform matrix
+// (matrix(scale,0,0,scale,x,y)) on the character's own <g> wrapper across
+// every frame, not just a bounding-box sweep. The scale (0.030215827748179)
+// and X position (10.923741340637207) are IDENTICAL at every single frame
+// - he never moves horizontally, only vertically - so with the native
+// asset at 336x695px, his real on-canvas footprint is:
+//   width:  336 * 0.030215827748179 ≈ 10.15   (x: 10.92 to 21.08)
+//   height: 695 * 0.030215827748179 ≈ 21.00   (y: -21 to 21 across all
+//                                               frames' y-translate values)
+// "8 -23 16 46" below crops tightly to that (a ~2-unit margin on every
+// side), instead of the old crop's ~11-unit empty margin on each side
+// horizontally. --spiderman-perch-height-* in index.html was recomputed to
+// match this crop's real 16:46 aspect ratio too - the old height values
+// were sized for the wrong (32:53) aspect ratio, which let "meet" scaling
+// add yet more letterboxing on top of the crop's own dead space.
+const SPIDERMAN_VIEWBOX_CROP = "8 -23 16 46";
 
 // Frame ranges - also measured directly from the rendered animation, not
 // assumed from the filename/description:
@@ -105,20 +129,31 @@ let spidermanIdleTimer = null;
 let spidermanRedropTimer = null;
 let spidermanInputTarget = null;   // the actual <textarea> the listener is attached to, for clean removal
 let spidermanInputListener = null;
+// True from the moment initSpiderman() starts until teardownSpiderman()
+// runs - guards against a real race: loadLottieData() is async, so if
+// showChatPage() somehow ran twice in one session (e.g. a session-expiry-
+// then-relogin without a full page reload) before the first mount's fetch
+// resolves, a second initSpiderman() call would start a SECOND concurrent
+// mount. Checked synchronously at the top of initSpiderman(), before the
+// fetch even starts - spidermanGeneration below only protects the async
+// callback itself, not this earlier window.
+let spidermanMountStarted = false;
 // Bumped by both initSpiderman() and teardownSpiderman() - guards against a
-// real race: loadLottieData() is async, so if the greeting gets hidden
-// (first message sent) or rebuilt (clearChat()) BEFORE that fetch
-// resolves, teardownSpiderman() runs while spidermanAnim is still null
-// (nothing to tear down yet) - a plain no-op. Without this counter, the
-// mount+drop that finishes moments later would go ahead anyway, leaving a
-// live, ticking instance (and idle timer) behind a hidden/replaced
-// greeting. Each async callback captures the generation at call time and
+// second real race: if a genuine teardown (handleSessionExpired() /
+// handleLogout()) runs WHILE the fetch from an in-flight initSpiderman()
+// is still pending, teardownSpiderman() runs while spidermanAnim is still
+// null (nothing to tear down yet) - a plain no-op. Without this counter,
+// the mount+drop that finishes moments later would go ahead anyway,
+// leaving a live, ticking instance running after the session has actually
+// ended. Each async callback captures the generation at call time and
 // bails if it no longer matches - confirmed by a rapid-fire clearChat()
-// stress test that reproduced exactly this without the check.
+// stress test that reproduced exactly this without the check, back when
+// clearChat() was still a teardown trigger (it no longer is - see
+// clearChat() itself).
 let spidermanGeneration = 0;
 // The logged-in user's profile, kept around so clearChat() can rebuild the
-// greeting (name/sub + the Spider-Man anchor) after wiping the DOM, the
-// same way showChatPage() builds it the first time.
+// greeting (name/sub) after wiping the DOM, the same way showChatPage()
+// builds it the first time.
 let currentProfile = null;
 
 // Explicit state, checked at the top of every trigger (page load, keystroke,
@@ -142,14 +177,18 @@ function clearSpidermanTimers() {
 
 /**
  * Full teardown: cancels pending timers, detaches the input listener, and
- * destroys the Lottie instance. MUST run before the greeting is hidden
- * (first message sent) or rebuilt (clearChat()) - otherwise a stale timer
- * fires later and tries to animate/query an element that's gone, or a
- * second init stacks a duplicate 'input' listener and a duplicate idle
- * timer on top of the old one.
+ * destroys the Lottie instance. The real teardown boundary now is an
+ * actual session end - handleSessionExpired() or handleLogout() - since
+ * #spiderman-lottie is a persistent element in the header bar that
+ * survives sendMessage() and clearChat() entirely (neither touches it
+ * anymore). Resetting spidermanMountStarted here (not just spidermanAnim)
+ * is what allows a legitimate FRESH mount later, if the user logs back in
+ * again in the same page load (session-expiry-then-relogin) rather than
+ * via a full page reload.
  */
 function teardownSpiderman() {
     spidermanGeneration++;   // invalidates any in-flight initSpiderman() mount
+    spidermanMountStarted = false;
     spidermanState = "idle";
     clearSpidermanTimers();
     if (spidermanInputTarget && spidermanInputListener) {
@@ -161,6 +200,13 @@ function teardownSpiderman() {
         spidermanAnim.destroy();
         spidermanAnim = null;
     }
+    // The container persists in the DOM across the whole session (it's
+    // not rebuilt like the old greeting-nested one was), so a genuine
+    // teardown must also reset its visual state directly - otherwise a
+    // later fresh mount could start from a stale "dropped" class left over
+    // from before this teardown ran.
+    const container = document.getElementById("spiderman-lottie");
+    if (container) container.classList.remove("spiderman-dropped");
 }
 
 function armSpidermanIdleTimer() {
@@ -224,55 +270,74 @@ function retractSpiderman(fromIdleTimeout) {
 }
 
 /**
- * Mounts the animation into #spiderman-lottie (built fresh by
- * renderGreeting()) and starts the drop -> idle -> retract state machine.
- * Safe to call repeatedly - always tears down any previous instance first,
- * so a second call (e.g. from clearChat() re-rendering the greeting) can't
- * leave two Lottie instances or two sets of timers running at once.
+ * Mounts the animation into the persistent #spiderman-lottie header-bar
+ * element and starts the drop -> idle -> retract state machine. Called
+ * once per session from showChatPage(). Mount-once, not "tear down and
+ * rebuild on every call" like the old greeting-anchored version - the
+ * spidermanMountStarted guard below makes a second call in the same
+ * session (session-expiry-then-relogin without a full reload) a no-op
+ * rather than restarting an already-running instance.
  */
 function initSpiderman() {
-    teardownSpiderman();
-    const myGeneration = spidermanGeneration;   // teardownSpiderman() just bumped it
+    // Synchronous guard, checked BEFORE the async fetch even starts - see
+    // the spidermanMountStarted declaration above for why this is a
+    // separate check from the generation counter below.
+    if (spidermanMountStarted) return;
+    spidermanMountStarted = true;
+    const myGeneration = spidermanGeneration;
 
     const container = document.getElementById("spiderman-lottie");
     const input = document.getElementById("chat-input");
-    if (!container || !input || typeof lottie === "undefined") return;
+    if (!container || !input || typeof lottie === "undefined") {
+        spidermanMountStarted = false;   // never actually started - allow a real retry later
+        return;
+    }
 
     loadLottieData(SPIDERMAN_LOTTIE_URL).then(data => {
-        // The greeting may have been hidden (first message) or rebuilt
-        // (clearChat()) while this fetch was in flight - either one bumps
-        // spidermanGeneration, so a mismatch here means this mount is
-        // stale and must NOT proceed (that's what leaves an orphaned timer
-        // running behind a hidden/replaced greeting). container.isConnected
-        // is kept too as a second, independent guard for the same case.
+        // A genuine teardown (handleSessionExpired()/handleLogout()) may
+        // have run while this fetch was in flight, bumping
+        // spidermanGeneration - a mismatch here means this mount is stale
+        // and must NOT proceed (that's what would otherwise leave a live
+        // instance running after the session already ended).
+        // container.isConnected is kept too as a second, independent guard
+        // for the same case.
         if (!data || myGeneration !== spidermanGeneration || !container.isConnected) return;
 
-        // Two things need filtering out of the raw file before mounting -
-        // both found by direct measurement, not assumed:
+        // The raw file has THREE things needing filtering before mounting,
+        // all found by direct measurement (never assumed) - the source
+        // file has TWO complete copies of the character stacked as
+        // [outline shape, matte shape, image] groups, and only one whole
+        // group should ever be visible:
         //
         // 1. A static, always-visible white background plate (a Lottie
         //    "solid" layer, ty:1) covering the full native canvas - fine as
-        //    a standalone sticker, wrong for an overlay decoration on top
-        //    of the greeting text.
+        //    a standalone sticker, wrong for an overlay decoration.
         //
-        // 2. A genuine DUPLICATE of the character. The file has TWO image
-        //    assets ("vmN1QaQglt" and "6FjzSH3h6q") that are byte-identical
-        //    (confirmed via MD5) - the same artwork twice. Layer refId
-        //    "vmN1QaQglt" is the real, animated character (its position
-        //    keyframes actually change frame to frame - matched by its
-        //    matte layer, the shape immediately before it in the array).
-        //    Layer refId "6FjzSH3h6q" is a second copy that's permanently
-        //    fixed at the settled position and fades in early (by frame 6)
-        //    then never moves or disappears again - this is the "second
-        //    Spider-Man, stuck, never animates" bug: it was never a
-        //    mounting/duplication bug in this code, it's unfiltered
-        //    duplicate content in the source file itself. Removing it (and
-        //    its own dedicated matte layer, same adjacency rule) along with
-        //    the white background is what actually fixes it.
+        // 2 & 3. A genuine DUPLICATE of the character. The file has TWO
+        //    image assets ("vmN1QaQglt" and "6FjzSH3h6q") that are
+        //    byte-identical (confirmed via MD5) - the same artwork twice.
+        //    refId "vmN1QaQglt" is the real, animated character (position
+        //    keyframes actually change frame to frame). refId
+        //    "6FjzSH3h6q" is a second copy permanently fixed at the
+        //    settled position [11,-21] the WHOLE animation - this was the
+        //    "second Spider-Man, stuck, never animates" bug fixed earlier.
+        //    But that fix only removed the image + its OWN matte (the
+        //    layer immediately before it, td:1) - it missed a THIRD layer
+        //    in the same duplicate group: a black-stroked OUTLINE shape,
+        //    one more position back, that has no refId to match on (only
+        //    image layers reference assets) and is ALSO permanently fixed
+        //    at [11,-21] confirmed the exact same way (every keyframe
+        //    holds an identical value). Left in, it rendered as a
+        //    disconnected black outline hovering above the real character
+        //    with visible empty space between them - not a separate "web"
+        //    at all, just the other half of the same duplicate-content bug.
+        //    The real character's OWN matching outline (the layer paired
+        //    with the kept image) stays - only the duplicate's group of
+        //    three is removed entirely.
         //
         // Filtering the data before mounting (rather than hiding elements
-        // in the rendered SVG afterwards) is the more robust fix for both -
-        // it can't come back if a future lottie-web version changes how it
+        // in the rendered SVG afterwards) is the more robust fix - it
+        // can't come back if a future lottie-web version changes how it
         // structures the DOM. The cache holds the ORIGINAL fetched data
         // (shared with anyone else who might load this URL), so build a
         // filtered copy instead of mutating it in place.
@@ -287,9 +352,18 @@ function initSpiderman() {
         // left consuming it.
         const duplicateMatteIdx = (duplicateIdx > 0 && rawLayers[duplicateIdx - 1].td === 1)
             ? duplicateIdx - 1 : -1;
+        // The duplicate's outline shape sits one MORE position back - it's
+        // not a matte (no td/tt at all), just a third standalone layer that
+        // belongs to the same duplicate group. Confirmed on this file:
+        // index (duplicateMatteIdx - 1) has a CONSTANT position identical
+        // to the duplicate's own [11,-21], the same "every keyframe holds
+        // the same value" signature used to identify the duplicate image
+        // itself in the first place.
+        const duplicateOutlineIdx = (duplicateMatteIdx > 0) ? duplicateMatteIdx - 1 : -1;
         const filteredData = {
             ...data,
-            layers: rawLayers.filter((l, i) => l.ty !== 1 && i !== duplicateIdx && i !== duplicateMatteIdx)
+            layers: rawLayers.filter((l, i) =>
+                l.ty !== 1 && i !== duplicateIdx && i !== duplicateMatteIdx && i !== duplicateOutlineIdx)
         };
 
         spidermanAnim = lottie.loadAnimation({
@@ -324,10 +398,10 @@ function initSpiderman() {
             // the actual artwork through.
             const clipRect = svg.querySelector("clipPath rect");
             if (clipRect) {
-                clipRect.setAttribute("x", "0");
-                clipRect.setAttribute("y", "-21");
-                clipRect.setAttribute("width", "32");
-                clipRect.setAttribute("height", "53");
+                clipRect.setAttribute("x", "8");
+                clipRect.setAttribute("y", "-23");
+                clipRect.setAttribute("width", "16");
+                clipRect.setAttribute("height", "46");
             }
             dropSpiderman();
         });
@@ -562,8 +636,55 @@ function setLoginLoading(btn, loading) {
     }
 }
 
+// =========================================================
+// MOBILE KEYBOARD LAYOUT FIX
+// .full-height (index.html) uses 100dvh so the page shrinks around the
+// on-screen keyboard instead of scrolling the header off-screen - see the
+// CSS comment there for the original bug. That fix alone left a real gap:
+// it only reliably re-applied when SOMETHING ELSE also forced a layout
+// reflow around the same time (e.g. autoResize() mutating the textarea's
+// own height on every keystroke) - dismissing the keyboard with no text
+// ever typed had no such trigger, so on some mobile browsers the page
+// stayed stuck in the shrunk "keyboard open" layout even after the
+// keyboard was gone. `100dvh` recalculating correctly is not guaranteed to
+// also repaint on its own the instant the keyboard closes on every engine.
+//
+// visualViewport's own 'resize' event exists specifically for this - it
+// fires on ANY on-screen-keyboard open/close, independent of typing or any
+// other DOM event, which is exactly the trigger the old CSS-only fix was
+// missing. Explicitly writing the live visual viewport height to a CSS
+// custom property on every fire, and having .full-height fall back to it,
+// guarantees the layout is forced to match reality on every keyboard
+// transition, not just the ones that happen to coincide with a keystroke.
+function initViewportHeightFix() {
+    if (!window.visualViewport) return;   // older browsers - the 100dvh fallback still applies
+    const applyViewportHeight = () => {
+        const h = window.visualViewport.height;
+        // Real bug found live: visualViewport.height can genuinely read 0
+        // (or any other bogus non-positive value) at the moment this first
+        // runs, very early in page/tab setup before layout has settled -
+        // and since "0px" is a syntactically VALID CSS length, writing it
+        // to --vvh permanently defeats .full-height's own `var(--vvh,
+        // 100dvh)` fallback (fallbacks only kick in when the custom
+        // property is UNSET, not when it holds a valid-but-wrong value).
+        // That collapsed the entire #chat-page to zero height - not a
+        // Spider-Man-specific bug, the WHOLE app appeared broken. If no
+        // later 'resize' event happens to fire to correct it, --vvh stays
+        // stuck at 0 for the rest of the session. Guarding here means a
+        // bad reading is simply skipped - the 100dvh fallback (or whatever
+        // --vvh already held from a previous good reading) stays in
+        // effect instead of being overwritten with garbage.
+        if (!(h > 0)) return;
+        document.documentElement.style.setProperty("--vvh", `${h}px`);
+    };
+    window.visualViewport.addEventListener("resize", applyViewportHeight);
+    applyViewportHeight();
+}
+
 // Allow Enter key to submit login
 document.addEventListener("DOMContentLoaded", () => {
+    initViewportHeightFix();
+
     document.getElementById("login-password").addEventListener("keydown", (e) => {
         if (e.key === "Enter") handleLogin();
     });
@@ -595,14 +716,15 @@ async function restoreSession() {
 
 
 /**
- * Renders the greeting block's text content (time/name/sub) and rebuilds
- * the wave-emoji anchor structure Spider-Man mounts into. Called both from
- * showChatPage() (first render) and clearChat() (the greeting reappears
- * after a wipe) so the two never drift out of sync.
+ * Renders the greeting block's text content (time/name/sub). Called both
+ * from showChatPage() (first render) and clearChat() (the greeting
+ * reappears after a wipe) so the two never drift out of sync.
  *
- * Builds the name line via DOM methods rather than innerHTML - profile.name
- * comes from the database, and this sidesteps any need to HTML-escape it
- * for a one-line greeting.
+ * No longer builds a Spider-Man anchor here - he moved to the persistent
+ * header bar (see app.js's SPIDER-MAN EASTER EGG section and
+ * #spiderman-lottie in index.html), a static element outside the greeting
+ * that clearChat() never touches, so nothing about his lifecycle depends
+ * on this function anymore.
  */
 function renderGreeting(profile) {
     const hour = new Date().getHours();
@@ -611,30 +733,7 @@ function renderGreeting(profile) {
     const sub = subGreetings[Math.floor(Math.random() * subGreetings.length)];
 
     document.getElementById("greeting-time").textContent = timeGreeting;
-
-    const nameEl = document.getElementById("greeting-name");
-    nameEl.textContent = "";
-    nameEl.appendChild(document.createTextNode(firstName + " "));
-
-    // .spiderman-anchor is the positioning reference for #spiderman-lottie
-    // (see the CSS comment in index.html) - it's always present regardless
-    // of the randomized sub-greeting text, unlike anchoring to specific
-    // subtitle words would be.
-    const waveWrap = document.createElement("span");
-    waveWrap.className = "spiderman-anchor";
-
-    const waveGlyph = document.createElement("span");
-    waveGlyph.className = "wave-glyph";
-    waveGlyph.textContent = "👋";
-    waveWrap.appendChild(waveGlyph);
-
-    const spidermanContainer = document.createElement("div");
-    spidermanContainer.id = "spiderman-lottie";
-    spidermanContainer.className = "spiderman-perch";
-    spidermanContainer.setAttribute("aria-hidden", "true");
-    waveWrap.appendChild(spidermanContainer);
-
-    nameEl.appendChild(waveWrap);
+    document.getElementById("greeting-name").textContent = `${firstName} 👋`;
 
     // Nova's introduction prefixed onto the existing rotating sub-greeting -
     // this is the first thing the assistant "says" before any chat happens.
@@ -668,9 +767,12 @@ function showChatPage(profile) {
         mountBotLottie(sidebarChameleon, CHAMELEON_LOTTIE_URL);
     }
 
-    // Set greeting (+ mount the Spider-Man easter egg on the wave emoji)
+    // Set greeting text
     currentProfile = profile;
     renderGreeting(profile);
+
+    // Mount the Spider-Man easter egg in the persistent header bar -
+    // once per session; a no-op if already mounted (see initSpiderman()).
     initSpiderman();
 
     // Build ID card
@@ -812,6 +914,10 @@ function handleSessionExpired() {
 
     removeTypingBubble();
     clearChat();
+    // This IS the real Spider-Man teardown boundary now - #chat-page gets
+    // hidden right below, so without this his idle/re-drop timers would
+    // keep firing indefinitely against a header bar nobody can see.
+    teardownSpiderman();
     userRole = null;
     currentProfile = null;
 
@@ -846,13 +952,12 @@ async function sendMessage() {
     // Hide greeting on first message
     if (messageCount === 0) {
         document.getElementById("greeting").style.display = "none";
-        // The greeting isn't removed from the DOM here (just hidden via
-        // CSS), so cleanupDetachedLottie()'s isConnected check would never
-        // catch a stale Spider-Man timer/animation on its own - tear it
-        // down explicitly instead, or the 30s idle timer (and a possible
-        // 5s re-drop timer after it) keeps firing in the background,
-        // animating an element nobody can see, for the rest of the session.
-        teardownSpiderman();
+        // Spider-Man deliberately does NOT get torn down here anymore - he
+        // lives in the persistent main chat area now (#spiderman-lottie),
+        // not nested inside the greeting, and is meant to keep running for
+        // the whole session, including after the first message is sent.
+        // See the SPIDER-MAN EASTER EGG section above for the actual
+        // teardown boundary (session expiry/logout).
     }
     messageCount++;
 
@@ -1086,12 +1191,10 @@ function removeTypingBubble() {
 function clearChat() {
     messageCount = 0;
 
-    // Tear down BEFORE wiping the DOM: the innerHTML replacement below
-    // destroys the old #spiderman-lottie element out from under the
-    // running animation, and would otherwise leave its idle/re-drop timers
-    // dangling with nothing valid left to act on.
-    teardownSpiderman();
-
+    // No Spider-Man teardown here anymore - #spiderman-lottie lives outside
+    // #chat-messages (a sibling in the main chat area, not inside it), so
+    // this innerHTML replacement never touches it, and he's meant to keep
+    // running undisturbed through a "Clear Chat" click.
     const container = document.getElementById("chat-messages");
     // Remove all messages but keep the greeting
     container.innerHTML = `
@@ -1106,18 +1209,12 @@ function clearChat() {
     cleanupDetachedLottie();
 
     // Re-set greeting text. Previously this only re-set greeting-time,
-    // leaving greeting-name/greeting-sub (and the wave emoji Spider-Man
-    // anchors to) blank after every "Clear Chat" click - a real bug, not
-    // just missing Spider-Man wiring: renderGreeting() does the full job
-    // (name + sub + rebuilding the wave-emoji anchor), the same call
-    // showChatPage() makes on first login, so the two can't drift apart
-    // again. initSpiderman() then starts a completely fresh state machine
-    // against the newly-built anchor - it already tears down any previous
-    // instance itself, so this can't stack duplicate timers on repeated
-    // clears.
+    // leaving greeting-name/greeting-sub blank after every "Clear Chat"
+    // click - a real bug, unrelated to Spider-Man: renderGreeting() does
+    // the full job (name + sub), the same call showChatPage() makes on
+    // first login, so the two can't drift apart again.
     if (currentProfile) {
         renderGreeting(currentProfile);
-        initSpiderman();
     } else {
         // Defensive fallback - clearChat() should only ever run after
         // showChatPage() has already set currentProfile, but degrade to
@@ -1134,6 +1231,11 @@ function clearChat() {
 // LOGOUT
 // =========================================================
 async function handleLogout() {
+    // The full page reload below wipes everything regardless, but tear
+    // down explicitly first anyway - the fetch is a real network round
+    // trip, and this closes the (small) window where the timers could
+    // otherwise keep ticking if the reload were ever delayed or interrupted.
+    teardownSpiderman();
     await fetch("/api/logout", { method: "POST" });
     location.reload();
 }

@@ -67,20 +67,37 @@
             --chameleon-offset-top-mobile: -49px;
             --chameleon-offset-right-mobile: -26px;
 
-            /*spiderman*/
-            --spiderman-size-desktop: 44px;
-            --spiderman-perch-height-desktop: 73px;
-            
-            --spiderman-drop-distance-desktop: 40px;
-            --spiderman-offset-top-desktop: -8px;
-            --spiderman-offset-left-desktop: 6px;
+            /* Spider-Man - moved from the greeting's wave emoji to the
+               persistent header bar (mobile hamburger row / desktop
+               sidebar header), so he stays mounted and active for the
+               whole session instead of disappearing once the greeting is
+               hidden. No offset-left vars anymore: horizontal centering is
+               done via left+transform in .spiderman-perch below (fixed
+               math per breakpoint, not a simple offset - see the comment
+               there), not a tunable left-offset. Sizes bumped up from the
+               greeting-anchored version per explicit request - starting
+               points for visual feedback, same as the chameleon.
 
-            --spiderman-size-mobile: 30px;
-            --spiderman-perch-height-mobile: 50px;
+               --spiderman-perch-height-* is NOT a free tuning knob - it's
+               derived from --spiderman-size-* to match the character's
+               real 16:46 aspect ratio (see SPIDERMAN_VIEWBOX_CROP in
+               app.js: height = size * 46 / 16). Get this out of sync with
+               the crop and "meet" scaling silently pads him with more
+               empty space again - exactly the bug that made him nearly
+               invisible before this crop was corrected: his own on-canvas
+               footprint is a tall, narrow ~10x21 native-unit sliver, not
+               anywhere close to square, so a mismatched box (the old
+               values assumed a 32:53-ish crop) shrinks him far more than
+               the size variable alone suggests. */
+            --spiderman-size-desktop: 64px;
+            --spiderman-perch-height-desktop: 184px;
+            --spiderman-drop-distance-desktop: -10px;
+            --spiderman-offset-top-desktop: -20px;
 
-            --spiderman-drop-distance-mobile: 46px;
-            --spiderman-offset-top-mobile: -15px;
-            --spiderman-offset-left-mobile: 15px;
+            --spiderman-size-mobile: 46px;
+            --spiderman-perch-height-mobile: 132px;
+            --spiderman-drop-distance-mobile: 50px;
+            --spiderman-offset-top-mobile: 2px;
         }
 
         /* Mascot containers - sized from the variables above */
@@ -110,67 +127,59 @@
             right: var(--chameleon-offset-right-desktop);
         }
 
+        /* Now that he's centered over the MAIN CHAT AREA (below), he
+           genuinely overlaps the greeting text when dropped - verified
+           live: at the settled frame his box covers the bottom ~7px of
+           "[Name] 👋" itself, not just empty space near it. Positioned
+           siblings with an explicit z-index always paint above normal-flow
+           text regardless of DOM order, so without this the greeting name
+           would render BEHIND him at that overlap - lifting it (and the
+           subtitle, for the same reason, defensively) into their own
+           positioned stacking context with a HIGHER z-index than his (10)
+           is what keeps the text always readable regardless of his
+           animation state. Real CSS stacking rule, not a DOM-order trick -
+           this is the same fix an earlier, greeting-anchored version of
+           Spider-Man needed for the identical reason, removed when he
+           briefly lived in the sidebar (no overlap there) and now needed
+           again after moving him back over the chat content. */
+        #greeting-name, #greeting-sub {
+            position: relative;
+            z-index: 20;
+        }
+
         /* Spider-Man easter egg - see app.js's spiderman state machine for
-           the drop/retract logic. Layering is the critical part here: the
-           greeting text must stay fully readable no matter what frame he's
-           on, so #greeting-name/#greeting-sub are lifted into their own
-           positioned stacking contexts (z-index 1) with a HIGHER z-index
-           than the animation container - real CSS stacking rule, not a DOM-
-           order trick, so it holds regardless of where the animation
-           visually extends to. #spiderman-lottie is nested inside
-           #greeting-name (inside the wave emoji's own anchor span) rather
-           than positioned by fixed coordinates, specifically so it always
-           tracks the emoji's actual rendered position - the greeting name
-           varies in length per user, so the emoji isn't at a fixed x
-           offset, and anchoring to fixed coordinates from a shared ancestor
-           would drift out of place for longer/shorter names. */
-        /* #greeting-sub explicitly outranks #greeting-name (2 > 1) rather
-           than relying on them landing at the same z-index and falling
-           back to DOM-order tie-breaking (which happens to work today
-           since greeting-sub comes after greeting-name, but would silently
-           break if that order ever changed) - explicit beats implicit for
-           something this layering-sensitive. */
-        #greeting-name {
-            position: relative;
-            z-index: 1;
-        }
-        #greeting-sub {
-            position: relative;
-            z-index: 2;
-        }
-        .spiderman-anchor {
-            position: relative;
-            display: inline-block;
-        }
-        /* The emoji glyph itself gets a LOCAL z-index higher than
-           #spiderman-lottie (both are children of .spiderman-anchor, so
-           this comparison is purely local to that span) - otherwise the
-           animation container, being position:absolute, would paint over
-           its own sibling emoji text by default even though the ANCESTOR
-           h2 already out-ranks unrelated siblings like #greeting-sub. */
-        .wave-glyph {
-            position: relative;
-            z-index: 2;
-        }
+           the drop/retract logic. Anchored to the persistent MAIN CHAT
+           AREA (mounts once, stays active the whole session) instead of
+           the greeting's wave emoji - a direct child of the flex-1 main
+           content wrapper, not the sidebar.
+
+           A previous version of this centered him within the SIDEBAR on
+           desktop (left:144px, half its 288px width) - wrong: the actual
+           ask was "centered over the chat UI", i.e. the main content area,
+           not tucked into the sidebar chrome. Fixed by moving the anchor
+           itself: the main content wrapper is already flex-1 (fills
+           whatever width remains after the sidebar on desktop, the full
+           width on mobile since the sidebar is off-canvas there), so a
+           single left:50% now correctly centers him at BOTH breakpoints -
+           no more fixed-pixel math needed per breakpoint, since the
+           container's own width already adapts. translateX(-50%) (true
+           centering) and translateY(...) (the drop distance) combine in
+           ONE transform declaration - .spiderman-dropped's override below
+           must always restate BOTH parts, not just add translateY alone,
+           or dropping him would also silently uncenter him. */
         .spiderman-perch {
             position: absolute;
+            left: 50%;
             top: var(--spiderman-offset-top-desktop);
-            left: var(--spiderman-offset-left-desktop);
             width: var(--spiderman-size-desktop);
             height: var(--spiderman-perch-height-desktop);
-            z-index: 1;
+            z-index: 10;
             pointer-events: none;
-            /* Resting (retracted) position by default - translateY(0).
-               dropSpiderman()/retractSpiderman() toggle the
-               .spiderman-dropped class to animate the real travel distance;
-               the Lottie's own frames (played independently via
-               playSegments) provide the character's own small settle
-               motion on top of this. */
-            transform: translateY(0);
+            transform: translateX(-50%) translateY(0);
             transition: transform 0.4s ease-in-out;
         }
         .spiderman-perch.spiderman-dropped {
-            transform: translateY(var(--spiderman-drop-distance-desktop));
+            transform: translateX(-50%) translateY(var(--spiderman-drop-distance-desktop));
         }
 
         /* Scrollbar styling */
@@ -396,15 +405,22 @@
             /* Spider-Man: same independent-per-breakpoint pattern as the
                chameleon above - overriding the actual properties, not just
                the desktop variables, so the two breakpoints can't bleed
-               into each other. */
+               into each other. left:50% (not a fixed px value like
+               desktop's 144px) is correct here specifically because the
+               sidebar is position:fixed/off-canvas on mobile and
+               contributes no width to #chat-page's flex layout - the main
+               content area alone fills it, so 50% of #chat-page's width
+               really is 50% of the visible header row. */
             .spiderman-perch {
+                /* left:50% no longer needs restating here - it's the base
+                   rule's value now too, since both breakpoints center him
+                   the same way against the main chat area's own width. */
                 top: var(--spiderman-offset-top-mobile);
-                left: var(--spiderman-offset-left-mobile);
                 width: var(--spiderman-size-mobile);
                 height: var(--spiderman-perch-height-mobile);
             }
             .spiderman-perch.spiderman-dropped {
-                transform: translateY(var(--spiderman-drop-distance-mobile));
+                transform: translateX(-50%) translateY(var(--spiderman-drop-distance-mobile));
             }
         }
 
@@ -431,6 +447,18 @@
         .full-height {
             height: 100vh;
             height: 100dvh;
+            /* JS-enforced layer (app.js's initViewportHeightFix()), applied
+               last so it wins when set. Real gap found in the dvh-only fix
+               above: it worked after the user typed something (some OTHER
+               style mutation - autoResize() on the textarea - happened to
+               force a reflow that picked up the new dvh value) but not
+               when the keyboard was dismissed with nothing typed, since
+               nothing forced that reflow in that path. --vvh is written
+               from visualViewport's own 'resize' event, which fires on
+               EVERY keyboard open/close regardless of typing - falls back
+               to 100dvh itself if --vvh was never set (older browsers, or
+               before the first resize event fires). */
+            height: var(--vvh, 100dvh);
         }
     </style>
 </head>
@@ -629,12 +657,42 @@
     ></div>
 
     <!-- MAIN CHAT AREA -->
-    <div class="flex-1 flex flex-col h-full min-w-0">
+    <div class="flex-1 flex flex-col h-full min-w-0 relative">
+
+        <!-- Spider-Man easter egg - persistent for the whole session
+             (mounted once by showChatPage(), never torn down until
+             logout/session expiry - see app.js). Anchored here, to the
+             MAIN CHAT AREA (not #chat-page as a whole, and not the
+             sidebar) - centered over the chat content itself, roughly
+             above the greeting, the same "top of the chat UI" position he
+             occupied before this move, just now persistent instead of
+             tied to the greeting. This wrapper is already flex-1 (fills
+             whatever width remains after the sidebar on desktop, the full
+             width on mobile since the sidebar is off-canvas there), so
+             left:50%+translateX(-50%) centers correctly at BOTH
+             breakpoints without needing separate fixed-pixel math per
+             breakpoint - unlike the sidebar, this container's own width
+             already adapts. Made position:relative specifically so this
+             can be positioned against it directly. -->
+        <div id="spiderman-lottie" class="spiderman-perch" aria-hidden="true"></div>
 
         <!-- Mobile/tablet-only header bar: hamburger opens the sidebar.
              Hidden entirely on desktop (md:hidden) since the sidebar is
-             already always visible there. -->
-        <div class="md:hidden flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-white flex-shrink-0">
+             already always visible there. mobile-header-bar id + z-index:
+             real bug found live - Spider-Man sits ABOVE this in DOM order
+             (so he can be the first child of the shared main-chat-area
+             wrapper, see the comment above), and being position:absolute
+             with an explicit z-index, he was painting IN FRONT of this
+             bar's white background wherever they overlap near the top -
+             looked like he and his web were floating above/in front of
+             the header rather than hanging down from behind it, which
+             reads as fake/unrealistic (a real spider would be occluded by
+             whatever it's anchored behind). Lifting this bar into its own
+             positioned stacking context with a HIGHER z-index than his
+             (10) fixes it the same way the greeting text is protected
+             above - he now genuinely renders behind this bar, only
+             visible in the open chat area below it. -->
+        <div id="mobile-header-bar" class="md:hidden flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-white flex-shrink-0 relative z-20">
             <button
                 id="hamburger-btn"
                 onclick="openSidebar()"
