@@ -150,7 +150,7 @@ def _score_almanac_sections(question):
 
     sections = [s.strip() for s in re.split(r'\n\s*\n', almanac) if s.strip()]
 
-    stopwords = {'what', 'when', 'where', 'how', 'is', 'are', 'the',
+    stopwords = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
                  'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
                  'can', 'you', 'tell', 'give', 'show'}
 
@@ -603,6 +603,97 @@ def log_unanswered_question(question):
         conn.close()
     except Exception as e:
         print(f'[UNANSWERED LOG ERROR] {e}')
+
+
+# =========================================================
+# LEARNED PHRASES
+# Same review-queue shape as Suggested Additions above, one step earlier
+# in the pipeline: this tracks questions the AI classifier (Option 3 -
+# see app.py's classifier lane) resolved correctly even though NLP's own
+# score_intent() missed them. A repeated phrasing here is a candidate to
+# promote directly into nlp_helpers.py's INTENT_DATA, so it's answered by
+# the instant NLP lane next time instead of costing a Groq call.
+#
+# Option A for now: dashboard.py's Approve action edits nlp_helpers.py's
+# source directly and requires an app restart to take effect - nothing
+# hot-reloads it, unlike the almanac. Option B (move INTENT_DATA phrases
+# into a hot-reloadable data file, same mtime-based auto-reload pattern as
+# get_almanac() above, so Approve applies instantly) is a deliberate
+# future upgrade, not an oversight - flagged here so a future session
+# doesn't "fix" the restart requirement by accident before deciding to.
+#
+# Nothing here applies automatically either - safety-checking (nlp_helpers.
+# check_phrase_safety()) only labels a candidate 'Safe to add' or 'Needs
+# review'; an admin still has to click Approve in the dashboard.
+# =========================================================
+def log_learned_phrase(question, intent, role):
+    """
+    Records (or, for a near-duplicate phrasing, increments) a classifier-
+    resolved candidate phrase in the learned_phrases table.
+
+    Same grouping mechanism as log_unanswered_question() - normalize_
+    question() + _normalized_word_set() + _overlap_score() at
+    CACHE_SIMILARITY_THRESHOLD (0.85) - but scoped to rows already
+    resolved to this SAME intent: two phrasings can share high word
+    overlap by coincidence ("how many periods left" / "how many teachers
+    left") without meaning the same thing, and INTENT_DATA is one global
+    dict keyed by intent name, not partitioned by role, so intent is the
+    only grouping key that actually matches what Approve would edit.
+
+    Only call this for a genuinely delivered answer - see app.py's
+    classifier lane, which skips this when the reply is itself one of
+    CLARIFICATION_CONFIG's clarifying prompts (the classifier picked an
+    intent, but the handler still had nothing to answer with).
+
+    Best-effort, same reasoning as log_unanswered_question(): a DB hiccup
+    here must never break the chat reply already being sent to the user.
+    """
+    normalized = normalize_question(question)
+    query_words = _normalized_word_set(normalized)
+    if not query_words:
+        return
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, normalized_phrase FROM learned_phrases "
+            "WHERE resolved_intent = %s AND applied = 0",
+            (intent,)
+        )
+        rows = cursor.fetchall()
+
+        best_id, best_score = None, 0
+        for row_id, stored_normalized in rows:
+            score = _overlap_score(query_words, _normalized_word_set(stored_normalized))
+            if score > best_score:
+                best_score = score
+                best_id = row_id
+
+        if best_score >= CACHE_SIMILARITY_THRESHOLD:
+            cursor.execute(
+                "UPDATE learned_phrases "
+                "SET ask_count = ask_count + 1, last_asked = NOW() "
+                "WHERE id = %s",
+                (best_id,)
+            )
+            print(f'[LEARNED PHRASE] Grouped into #{best_id} (score {best_score:.2f}): '
+                  f'{question} -> {intent}')
+        else:
+            cursor.execute(
+                "INSERT INTO learned_phrases "
+                "(phrase_text, normalized_phrase, resolved_intent, role, "
+                " ask_count, first_asked, last_asked, applied) "
+                "VALUES (%s, %s, %s, %s, 1, NOW(), NOW(), 0)",
+                (question, normalized, intent, role)
+            )
+            print(f'[LEARNED PHRASE] New candidate logged: {question} -> {intent} ({role})')
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f'[LEARNED PHRASE LOG ERROR] {e}')
 
 
 def cache_answer(normalized_question, answer):

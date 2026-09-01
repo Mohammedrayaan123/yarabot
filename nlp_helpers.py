@@ -1,4 +1,5 @@
 
+import ast
 import difflib
 import re
 
@@ -100,11 +101,11 @@ INTENT_DATA = {
 
     # ---- Student expansion ----
     "identity": {
-        "phrases": ["what is my name", "who am i", "my details", "my info"],
+        "phrases": ["what is my name", "who am i", "my details", "my info", "share my identity card info"],
         "keywords": ["name", "who"],
     },
     "roll_number": {
-        "phrases": ["my roll number", "what is my roll", "roll no", "roll number"],
+        "phrases": ["my roll number", "what is my roll", "roll no", "roll number", "my enrollment number please"],
         "keywords": ["roll"],
     },
     "my_class": {
@@ -225,6 +226,16 @@ INTENT_DATA = {
                     "any notice", "new notices"],
         "keywords": ["notice", "notices", "announcement", "announcements"],
     },
+    # Deliberately NOT "what subjects" alone - that also matches a teacher
+    # asking about their OWN subjects ("what subjects do i teach"), which
+    # this intent shouldn't answer for. Every phrase here names the SCHOOL
+    # as the subject of the question, not the asker.
+    "subjects_offered": {
+        "phrases": ["subjects does the school", "subjects does yara",
+                    "subjects are offered", "subjects offered", "school subjects",
+                    "list of subjects", "subjects available", "subjects does this school"],
+        "keywords": ["subjects", "curriculum"],
+    },
 }
 
 
@@ -247,6 +258,11 @@ AMBIGUOUS_KEYWORDS = {
     # "grade 5 fees"/"grade 5 tuition" is almanac content, not my_class's
     # "which grade am i in" (that's a phrase match, unaffected by this).
     "class", "classes", "grade", "grades",
+    # collides with the almanac's ENTRANCE TEST section ("Grades I & II:
+    # English, Mathematics, Hindi") - "what subjects are tested in the
+    # entrance exam" is real almanac FAQ content, not subject_teacher's
+    # "who teaches me" territory
+    "subject", "subjects",
     # "period"/"periods" considered but left off - zero occurrences in
     # school_almanac.txt, and tightening it broke a real working case
     # ("mondays periods" for a student). App.py's almanac-overlap check is
@@ -405,3 +421,215 @@ def detect_intent(question, possible_intents, confidence_threshold=1):
     """
     intent, _ = detect_intent_with_score(question, possible_intents, confidence_threshold)
     return intent
+
+
+# =========================================================
+# LEARNED PHRASES — safety check
+# Backs the dashboard's "Learned Phrases" review queue (candidate phrases
+# the AI classifier resolved but score_intent() itself missed - see
+# app.py's classifier lane and gemini_rag.log_learned_phrase()). Before a
+# candidate can be marked safe to promote into INTENT_DATA, this runs it
+# through the SAME score_intent() this file already uses at request time -
+# not a separate pattern-matching heuristic that could drift from how
+# scoring actually behaves.
+# =========================================================
+
+# "Scores meaningfully" bar for the score_intent() collision check below -
+# mirrors ALMANAC_STRONG_MATCH_SCORE (app.py), this project's existing
+# precedent for "confident enough to matter", not a new number invented
+# for this feature. Not imported from app.py: app.py already imports FROM
+# this module, so importing back would be circular (same reasoning as
+# extract_class_from_question's duplicated regex there).
+_COLLISION_SCORE_THRESHOLD = 2
+
+
+def check_phrase_safety(phrase, target_intent, same_role_intents=None):
+    """
+    Simulates adding `phrase` to target_intent's phrases list and checks it
+    for collisions against every OTHER intent already in INTENT_DATA.
+
+    same_role_intents: optional set of intent names that share at least
+    one role with target_intent (from app.py's ROLE_PERSONAL_INTENTS - not
+    imported here, app.py already imports FROM this module, so dashboard.py
+    passes it in instead). When given, each conflict is labeled same-role
+    (a real routing risk - that other intent is actually scored alongside
+    this one) or cross-role (informational only - found via live testing:
+    "who's free right now" (principal, free_teachers) collides with
+    "current_class"'s "right now" phrase, but current_class only exists
+    for the teacher role and is never scored against a principal's
+    question, so that particular collision can't actually misroute
+    anything). Without it (the default), every collision is reported
+    as-is with no role context, since there's nothing to compare against.
+
+    Three checks, most concrete first:
+    1. The phrase overlaps another intent's own phrase text, or shares an
+       exact word with another intent's keyword list - a literal reuse of
+       wording that's already claimed elsewhere.
+    2. score_intent() run against every OTHER intent with this exact
+       phrase, using its own real personal_signal/class_code_present
+       state - if some other intent would score >= _COLLISION_SCORE_
+       THRESHOLD on this wording as-is, adding it here means two intents
+       fight over the same question.
+    3. The phrase's words include an AMBIGUOUS_KEYWORDS entry, and the
+       phrase itself doesn't establish a personal signal ("my"/"i"/"me")
+       or a distinctive 3+ word structure - the same conditions
+       score_intent() already relies on to stop a bare ambiguous keyword
+       from scoring elsewhere. Flagged even with no direct collision found
+       today, since this is exactly the failure mode AMBIGUOUS_KEYWORDS
+       exists to catch before a FUTURE almanac addition creates one
+       silently ("teachers day"/"exam schedule" both started this way).
+
+    Returns (status, reason): status is "safe" or "needs_review"; reason
+    is "" for "safe", otherwise names the specific conflict(s) found.
+    """
+    cleaned = clean_question(phrase)
+    words = tokenize(cleaned)
+    personal = has_personal_signal(cleaned)
+    code_present = has_class_code(cleaned)
+
+    reasons = []
+    for other_intent, data in INTENT_DATA.items():
+        if other_intent == target_intent:
+            continue
+
+        if same_role_intents is None:
+            role_note = ""
+        elif other_intent in same_role_intents:
+            role_note = " [same role - real routing risk]"
+        else:
+            role_note = " [different role - not actually scored together, informational only]"
+
+        for existing_phrase in data.get("phrases", []):
+            if existing_phrase and (existing_phrase in cleaned or cleaned in existing_phrase):
+                reasons.append(
+                    f'overlaps existing phrase "{existing_phrase}" already registered under '
+                    f"'{other_intent}'{role_note}"
+                )
+
+        shared_keywords = set(words) & set(data.get("keywords", []))
+        if shared_keywords:
+            reasons.append(
+                f"shares keyword(s) {sorted(shared_keywords)} with '{other_intent}'{role_note}"
+            )
+
+        score = score_intent(cleaned, words, other_intent, personal, code_present)
+        if score >= _COLLISION_SCORE_THRESHOLD:
+            reasons.append(
+                f"scores {score} against '{other_intent}' under score_intent() as-is - "
+                f"would be ambiguous{role_note}"
+            )
+
+    if reasons:
+        # de-duplicate while keeping order - checks 1 and 2 above can both
+        # legitimately fire for the same intent (a phrase substring hit
+        # naturally also scores high), no need to say it twice
+        seen = set()
+        unique_reasons = [r for r in reasons if not (r in seen or seen.add(r))]
+        return "needs_review", "; ".join(unique_reasons)
+
+    ambiguous_words = [w for w in words if w in AMBIGUOUS_KEYWORDS]
+    if ambiguous_words and not personal and len(words) < 3:
+        return "needs_review", (
+            f"core word(s) {ambiguous_words} are in AMBIGUOUS_KEYWORDS and this phrase has no "
+            "personal signal ('my'/'i'/'me') or distinctive 3+ word structure - could silently "
+            "collide with future almanac content the same way 'teachers day'/'exam schedule' did"
+        )
+
+    return "safe", ""
+
+
+def _quote_literal(text):
+    """Double-quoted, matching this file's own string style - falls back to
+    repr() only if the text itself contains a double quote, which would
+    otherwise break out of the literal."""
+    if '"' not in text:
+        return f'"{text}"'
+    return repr(text)
+
+
+def apply_phrase_to_intent_data(phrase, target_intent, file_path=None):
+    """
+    Appends `phrase` to target_intent's "phrases" list, editing THIS FILE'S
+    OWN SOURCE on disk - the dashboard's Learned Phrases "Approve" action.
+
+    Uses ast.parse() to find the exact source position of the last element
+    in target_intent's phrases list (or the list's own position, if empty),
+    then inserts as plain text at that exact line/column - regardless of
+    whether the list is written on one line or wrapped across several (see
+    the file's own phrases lists for both styles). A blind regex/string
+    replace can't reliably tell "the end of THIS intent's phrases list"
+    from a similar-looking line elsewhere; AST position info can.
+
+    Does NOT reformat/re-wrap the edited line afterward - it may end up
+    longer than this file's usual style. Left for an optional manual
+    cleanup pass rather than risking a naive line-wrapping heuristic
+    corrupting the surrounding formatting.
+
+    Re-parses the edited source before writing anything - if the result
+    wouldn't itself be valid Python, the file on disk is left untouched
+    and this raises instead.
+
+    Option A (see gemini_rag.py's LEARNED PHRASES section): this edits the
+    source file, but the nlp_helpers module already loaded in the running
+    Flask process keeps its OLD INTENT_DATA in memory until restarted -
+    dashboard.py must say so next to the Approve button, not imply this is
+    instant like the Almanac editor.
+
+    Returns True if the phrase was inserted, False if it was already
+    present (no-op, not an error). Raises ValueError if target_intent
+    doesn't exist in INTENT_DATA, or if it has no "phrases" list.
+    """
+    path = file_path or __file__
+    with open(path, "r", encoding="utf-8") as f:
+        source = f.read()
+    lines = source.splitlines(keepends=True)
+
+    tree = ast.parse(source)
+    intent_data_node = next(
+        (node.value for node in ast.walk(tree)
+         if isinstance(node, ast.Assign)
+         and any(isinstance(t, ast.Name) and t.id == "INTENT_DATA" for t in node.targets)),
+        None
+    )
+    if intent_data_node is None or not isinstance(intent_data_node, ast.Dict):
+        raise ValueError(f"Could not locate INTENT_DATA dict in {path}")
+
+    target_dict_node = next(
+        (v for k, v in zip(intent_data_node.keys, intent_data_node.values)
+         if isinstance(k, ast.Constant) and k.value == target_intent),
+        None
+    )
+    if target_dict_node is None:
+        raise ValueError(f"Intent '{target_intent}' not found in INTENT_DATA")
+
+    phrases_list_node = next(
+        (v for k, v in zip(target_dict_node.keys, target_dict_node.values)
+         if isinstance(k, ast.Constant) and k.value == "phrases"),
+        None
+    )
+    if phrases_list_node is None or not isinstance(phrases_list_node, ast.List):
+        raise ValueError(f"Intent '{target_intent}' has no \"phrases\" list to append to")
+
+    existing = [el.value for el in phrases_list_node.elts if isinstance(el, ast.Constant)]
+    if phrase in existing:
+        return False
+
+    if phrases_list_node.elts:
+        last = phrases_list_node.elts[-1]
+        insert_line, insert_col = last.end_lineno, last.end_col_offset
+        insertion = f", {_quote_literal(phrase)}"
+    else:
+        insert_line = phrases_list_node.lineno
+        insert_col = phrases_list_node.col_offset + 1  # just past the opening "["
+        insertion = _quote_literal(phrase)
+
+    target_line = lines[insert_line - 1]
+    lines[insert_line - 1] = target_line[:insert_col] + insertion + target_line[insert_col:]
+
+    new_source = "".join(lines)
+    ast.parse(new_source)  # fail loudly rather than write a broken file
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_source)
+
+    return True

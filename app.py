@@ -32,7 +32,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
 from nlp_helpers import detect_intent, detect_intent_with_score
-from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent
+from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent, log_learned_phrase
 from config import DB_CONFIG
 import mysql.connector
 
@@ -144,15 +144,15 @@ def is_pure_greeting(question):
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
                 "roll_number", "my_class", "next_period", "subject_teacher",
-                "notices"],
+                "notices", "subjects_offered"],
     "teacher": ["period_count", "timetable", "classes_assigned", "next_class",
                 "current_class", "free_periods", "periods_remaining", "teacher_identity",
-                "notices"],
+                "notices", "subjects_offered"],
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
                   "class_wise_count", "teacher_location", "classroom_occupant",
                   "free_teachers", "teacher_schedule_lookup", "class_timetable_lookup",
                   "school_wide_subject_teacher", "class_teacher_lookup",
-                  "low_attendance_count", "pending_fees_count", "notices"],
+                  "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"],
 }
 
 
@@ -559,6 +559,74 @@ def not_found(e):
 
 
 # =========================================================
+# SINGLE-TURN CLARIFICATION MEMORY
+# A handler that can't extract what it needs (no subject/class/teacher
+# named) asks a clarifying question instead of answering. Without this,
+# the student's next message - "umm math" - was routed as a brand new,
+# unrelated question and got a wrong answer instead of completing the one
+# they were actually answering. Scoped to exactly one follow-up message:
+# pending_clarification is popped from the session the moment the next
+# message arrives, whether or not it resolves anything, so a stale
+# clarification can never linger into a later, unrelated conversation.
+# =========================================================
+CLARIFICATION_CONFIG = {
+    "subject_teacher": {
+        "role": "student",
+        "prompt": "Which subject would you like to know the teacher for?",
+    },
+    "school_wide_subject_teacher": {
+        "role": "principal",
+        "prompt": "Which subject would you like to know the teacher for?",
+    },
+    "class_teacher_lookup": {
+        "role": "principal",
+        "prompt": "Which class would you like to check? Please include the class (e.g. 10-A).",
+    },
+    "teacher_schedule_lookup": {
+        "role": "principal",
+        "prompt": "Which teacher's schedule would you like to see?",
+    },
+}
+# (role, exact clarifying text) -> intent. subject_teacher and school_wide_
+# subject_teacher share the same prompt text, but never the same role
+# (student-only vs. principal-only), so the pair stays unambiguous.
+_CLARIFICATION_BY_PROMPT = {
+    (cfg["role"], cfg["prompt"]): intent for intent, cfg in CLARIFICATION_CONFIG.items()
+}
+# Bare set of the prompt text alone (role-independent) - used by the
+# classifier lane below to tell "the classifier picked an intent AND the
+# handler actually answered" apart from "the classifier picked an intent
+# but the handler still had nothing to work with", so Learned Phrases only
+# logs genuine deliveries, not a clarifying question in disguise.
+_CLARIFICATION_PROMPTS = {cfg["prompt"] for cfg in CLARIFICATION_CONFIG.values()}
+
+
+def _resume_clarification_reply(intent, question, linked_id):
+    """Re-runs the ORIGINAL handler on the follow-up message, so it
+    re-extracts its slot the exact same way it did the first time - no
+    separate extraction logic here to keep in sync with each handler's own."""
+    if intent == "subject_teacher":
+        return handle_subject_teacher(question, linked_id, _known_subject_names())
+    if intent == "school_wide_subject_teacher":
+        return handle_school_wide_subject_teacher(question)
+    if intent == "class_teacher_lookup":
+        return handle_class_teacher_lookup(question)
+    if intent == "teacher_schedule_lookup":
+        return handle_teacher_schedule_lookup(question)
+    return None
+
+
+def _maybe_set_pending_clarification(role, reply):
+    """Called after every NLP-lane/classifier-lane reply - if it's one of
+    the exact clarifying prompts above, remember what was asked so the
+    NEXT message can try to complete it instead of starting fresh."""
+    intent = _CLARIFICATION_BY_PROMPT.get((role, reply))
+    if intent:
+        session["pending_clarification"] = {"intent": intent, "role": role}
+        print(f'[CLARIFICATION SET] intent={intent} role={role}')
+
+
+# =========================================================
 # CHAT ROUTE — the NLP brain
 # =========================================================
 @app.route("/api/chat", methods=["POST"])
@@ -575,6 +643,23 @@ def chat():
         return jsonify({"reply": "Please type a question first."})
 
     question_lower = question.lower()
+
+    # Check for a pending clarification BEFORE normal routing - popped
+    # immediately either way (success or failure), so it can only ever
+    # affect this one follow-up message. On failure, deliberately don't
+    # return here - falls through to normal routing below so an unrelated
+    # message right after a clarifying question still gets answered.
+    pending = session.pop("pending_clarification", None)
+    if pending and pending.get("role") == role:
+        config = CLARIFICATION_CONFIG.get(pending.get("intent"))
+        resumed = (_resume_clarification_reply(pending.get("intent"), question_lower, linked_id)
+                   if config else None)
+        if resumed is not None and resumed != config["prompt"]:
+            print(f'[CLARIFICATION RESUMED] intent={pending["intent"]} role={role} '
+                  f'follow_up={question_lower!r}')
+            return jsonify({"reply": resumed})
+        print(f'[CLARIFICATION EXPIRED] intent={pending.get("intent")} role={role} '
+              f'follow_up={question_lower!r} -> falling through to normal routing')
 
     # THREE-LANE ROUTING:
     # Lane 1: Personal question → NLP + MySQL (private, personal data).
@@ -612,6 +697,7 @@ def chat():
             print(f'[NLP MISS -> GEMINI FALLBACK] Question: {question_lower}')
             return stream_gemini_reply(question_lower)
 
+        _maybe_set_pending_clarification(role, reply)
         return jsonify({"reply": reply})
 
     # CLASSIFIER LANE: fires whenever get_routing_decision() found NEITHER
@@ -648,6 +734,14 @@ def chat():
                 reply = answer_teacher(question_lower, linked_id, forced_intent=classified_intent)
             else:  # principal
                 reply = answer_principal(question_lower, forced_intent=classified_intent)
+            _maybe_set_pending_clarification(role, reply)
+
+            # Learned Phrases: log only a genuine delivery - the classifier
+            # picked an intent AND the handler actually answered, not a
+            # clarifying question the handler still had to ask right back.
+            if reply not in _CLARIFICATION_PROMPTS:
+                log_learned_phrase(question_lower, classified_intent, role)
+
             return jsonify({"reply": reply})
         # Classifier picked NONE, or the call failed/errored - fail open,
         # fall through to the exact same Gemini/almanac lane as today.
@@ -724,13 +818,47 @@ def estimate_current_period_number():
     return max(1, now.hour - 7)
 
 
+# Casual shorthand a student might type ("math", "bio", "cs") that the
+# tier-3 substring check below can't reach on its own - either the word's
+# under its 4-character floor ("bio", "cs", "eng", "soc") or it just isn't
+# a literal substring of the real name at all ("maths" isn't a substring
+# of "mathematics" - the trailing "s" breaks it). Multiple possible
+# targets per real-world alias are listed on purpose; _subject_alias_map()
+# below keeps only the ones this school's DB actually has, so an alias for
+# a subject not currently taught here (no "Physical Education" today)
+# stays inert instead of getting hardcoded as if it existed.
+_SUBJECT_ALIAS_HINTS = {
+    "math": "Mathematics", "maths": "Mathematics",
+    "bio": "Biology",
+    "chem": "Chemistry",
+    "phy": "Physics",
+    "cs": "Computer Science", "comp sci": "Computer Science", "compsci": "Computer Science",
+    "soc": "Social Studies", "socials": "Social Studies", "sst": "Social Studies",
+    "eng": "English",
+    "pe": "Physical Education", "gym": "Physical Education", "phys ed": "Physical Education",
+    "geo": "Geography",
+    "hist": "History",
+}
+
+
+def _subject_alias_map(known_subjects):
+    """_SUBJECT_ALIAS_HINTS filtered down to aliases whose target subject is
+    actually in known_subjects, and remapped to the DB's real casing."""
+    lower_lookup = {s.lower(): s for s in known_subjects}
+    return {
+        alias: lower_lookup[canonical.lower()]
+        for alias, canonical in _SUBJECT_ALIAS_HINTS.items()
+        if canonical.lower() in lower_lookup
+    }
+
+
 def extract_subject_from_question(question, known_subjects):
     """
     Returns a subject name if one is mentioned in the question.
     known_subjects: list of actual subject names from the DB (fetch once,
     pass in) so we're not guessing/hardcoding subjects.
 
-    Two tiers, found via live testing:
+    Three tiers, found via live testing:
 
     1. Full subject name present in the question -> prefer the LONGEST
        match. This school's data has both "Science" and "Computer Science"
@@ -738,12 +866,16 @@ def extract_subject_from_question(question, known_subjects):
        "Computer Science" - without preferring the longer match, "how many
        teachers teach computer science" silently answered about plain
        Science instead, depending on arbitrary DB row order.
-    2. Only if NO full name matched: fall back to a shortened/informal form
-       the user typed (e.g. "math" for "Mathematics", "chem" for
-       "Chemistry") - any question word of at least 4 characters that's a
-       substring of the subject name. Gated strictly behind tier 1 finding
-       nothing: an earlier version checked both tiers unconditionally, and
-       a plain "science" question got hijacked into "Computer Science"
+    2. Only if NO full name matched: the curated alias map (_SUBJECT_ALIAS_
+       HINTS) - "math"/"cs"/"bio"/"soc"/"eng" and friends. Matched with
+       word boundaries so a short alias like "cs" can't fire off a
+       substring inside an unrelated word ("process", "cost").
+    3. Only if NEITHER of the above matched: fall back to a shortened/
+       informal form the user typed that isn't in the alias map either -
+       any question word of at least 4 characters that's a substring of
+       the subject name. Gated strictly behind tiers 1-2 finding nothing:
+       an earlier version checked this unconditionally alongside tier 1,
+       and a plain "science" question got hijacked into "Computer Science"
        because the word "science" is also a substring of THAT longer name.
     """
     q = question.lower()
@@ -751,6 +883,14 @@ def extract_subject_from_question(question, known_subjects):
     full_matches = [s for s in known_subjects if s.lower().strip() in q]
     if full_matches:
         return max(full_matches, key=len)
+
+    alias_map = _subject_alias_map(known_subjects)
+    alias_matches = [
+        canonical for alias, canonical in alias_map.items()
+        if re.search(r'\b' + re.escape(alias) + r'\b', q)
+    ]
+    if alias_matches:
+        return max(set(alias_matches), key=len)
 
     q_words = q.split()
     partial_matches = [
@@ -803,11 +943,12 @@ def _known_subject_names():
 
 # =========================================================
 # NLP EXPANSION — shared across all three roles
-# Notices aren't personal to any one student/teacher, and they're not
-# principal-only school stats either - every role sees the same list, so
-# unlike every other handler in this file there's no role-specific ID to
-# branch on. This is the only handler called verbatim from all three of
-# answer_student()/answer_teacher()/answer_principal() below.
+# Notices/subjects_offered aren't personal to any one student/teacher, and
+# they're not principal-only school stats either - every role sees the
+# same answer, so unlike every other handler in this file there's no
+# role-specific ID to branch on. These are the only handlers called
+# verbatim from all three of answer_student()/answer_teacher()/
+# answer_principal() below.
 # =========================================================
 def handle_notices():
     """Returns the most recent notices posted via the dashboard, newest
@@ -823,6 +964,32 @@ def handle_notices():
 
     lines = [f"**{title}** ({date_posted})\n{body}" for title, body, date_posted in results]
     return "📢 Latest notices:\n\n" + "\n\n".join(lines)
+
+
+def handle_subjects_offered(question):
+    """The school's curriculum - distinct subjects taught, optionally
+    narrowed to one class if a class code is mentioned ("what subjects
+    does 10-A study"). Instant DB lookup, no Gemini call needed - this
+    data lives in the subjects/timetable tables, not the almanac file
+    Gemini reads from, so Gemini has no way to answer this on its own."""
+    cls = extract_class_from_question(question)
+
+    if cls:
+        results = query("""
+            SELECT DISTINCT s.subject_name
+            FROM timetable t
+            JOIN subjects s ON t.subject_id = s.subject_id
+            WHERE t.class = %s
+            ORDER BY s.subject_name
+        """, (cls,), fetch=True, many=True)
+        if not results:
+            return f"No subjects found for **{cls}** yet."
+        return f"**{cls}** studies: " + ", ".join(r[0] for r in results) + "."
+
+    subjects = _known_subject_names()
+    if not subjects:
+        return "I couldn't find the subject list right now."
+    return "Yara International School teaches: " + ", ".join(sorted(subjects)) + "."
 
 
 # =========================================================
@@ -1392,8 +1559,19 @@ def answer_student(question, student_id, forced_intent=None):
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
          "identity", "roll_number", "my_class", "next_period", "subject_teacher",
-         "notices"]
+         "notices", "subjects_offered"]
     )
+
+    # subject_teacher's "who teaches me"/"teacher for" phrases are about a
+    # SPECIFIC subject; subjects_offered's are about the curriculum in
+    # general. Phrase sets don't overlap, but a subject name mentioned
+    # alongside otherwise-generic curriculum wording ("does the school
+    # offer computer science") can still score subjects_offered - redirect
+    # to the specific lookup when a real subject is actually named, same
+    # class-code-vs-named-entity redirect used in answer_principal() below.
+    if forced_intent is None and intent == "subjects_offered" \
+            and extract_subject_from_question(question, _known_subject_names()):
+        intent = "subject_teacher"
 
     if intent == "greeting":
         return "Hi, I'm Nova! Ask me about your attendance, exams, timetable, or fees. 😊"
@@ -1457,6 +1635,9 @@ def answer_student(question, student_id, forced_intent=None):
     elif intent == "notices":
         return handle_notices()
 
+    elif intent == "subjects_offered":
+        return handle_subjects_offered(question)
+
     return ("I didn't quite get that. Try asking about:\n"
             "**attendance**, **exams**, **timetable**, **fees**, or your **details**.")
 
@@ -1467,7 +1648,7 @@ def answer_teacher(question, teacher_id, forced_intent=None):
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
          "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
-         "notices"]
+         "notices", "subjects_offered"]
     )
 
     if intent == "greeting":
@@ -1536,6 +1717,9 @@ def answer_teacher(question, teacher_id, forced_intent=None):
     elif intent == "notices":
         return handle_notices()
 
+    elif intent == "subjects_offered":
+        return handle_subjects_offered(question)
+
     return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
 
 
@@ -1553,7 +1737,7 @@ def answer_principal(question, forced_intent=None):
          "teacher_location", "classroom_occupant", "free_teachers",
          "teacher_schedule_lookup", "class_timetable_lookup",
          "school_wide_subject_teacher", "class_teacher_lookup",
-         "low_attendance_count", "pending_fees_count", "notices"]
+         "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"]
     )
 
     # teacher_schedule_lookup's "schedule for" and school_wide_subject_
@@ -1574,6 +1758,17 @@ def answer_principal(question, forced_intent=None):
         elif intent == "school_wide_subject_teacher":
             if not extract_subject_from_question(question, _known_subject_names()):
                 intent = "class_teacher_lookup"
+
+    # Same reasoning as the class-code redirect above, other direction:
+    # subjects_offered ("what subjects does the school teach") and
+    # school_wide_subject_teacher ("who teaches computer science") have
+    # disjoint phrase sets, but a subject name mentioned inside otherwise
+    # generic curriculum wording can still score subjects_offered. A real
+    # subject being named is a stronger signal than that - redirect to the
+    # specific lookup instead of answering with the whole subject list.
+    if forced_intent is None and intent == "subjects_offered" \
+            and extract_subject_from_question(question, _known_subject_names()):
+        intent = "school_wide_subject_teacher"
 
     if intent == "greeting":
         return "Good day! I'm Nova. Ask me about student numbers, teachers, or class breakdowns. 😊"
@@ -1649,6 +1844,9 @@ def answer_principal(question, forced_intent=None):
 
     elif intent == "notices":
         return handle_notices()
+
+    elif intent == "subjects_offered":
+        return handle_subjects_offered(question)
 
     return "I didn't understand that. Try asking about **students**, **teachers**, or **class breakdown**."
 

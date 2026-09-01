@@ -111,6 +111,20 @@ CREATE TABLE IF NOT EXISTS unanswered_questions (
 )
 """
 
+tables["learned_phrases"] = """
+CREATE TABLE IF NOT EXISTS learned_phrases (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    phrase_text VARCHAR(500),
+    normalized_phrase VARCHAR(500),
+    resolved_intent VARCHAR(100),
+    role VARCHAR(20),
+    ask_count INT DEFAULT 1,
+    first_asked DATETIME,
+    last_asked DATETIME,
+    applied TINYINT(1) DEFAULT 0
+)
+"""
+
 tables["users"] = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -123,7 +137,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 # FK order: timetable references subjects/teachers, so those go first.
 creation_order = ["subjects", "teachers", "students", "timetable", "exams", "notes", "notices",
-                   "unanswered_questions", "users"]
+                   "unanswered_questions", "learned_phrases", "users"]
 
 for table_name in creation_order:
     cursor.execute(tables[table_name])

@@ -15,6 +15,8 @@ import mysql.connector
 import pandas as pd
 from auth_helpers import hash_password, verify_password
 from config import DB_CONFIG
+from nlp_helpers import check_phrase_safety, apply_phrase_to_intent_data
+from app import ROLE_PERSONAL_INTENTS
 from validators import (
     validate_name, validate_class, validate_contact,
     validate_roll_no, validate_attendance, validate_username,
@@ -143,7 +145,7 @@ if st.sidebar.button("Log Out"):
 page = st.sidebar.radio(
     "Go to",
     ["Students", "Teachers", "Subjects", "Timetable", "Exams", "Logins",
-     "Notices", "Almanac", "Suggested Additions"]
+     "Notices", "Almanac", "Suggested Additions", "Learned Phrases"]
 )
 
 
@@ -1192,3 +1194,108 @@ elif page == "Suggested Additions":
                                 st.session_state[f"show_add_form_{qid}"] = False
                                 st.success("✅ Added to the almanac! Nova can answer this immediately - no restart needed.")
                                 st.rerun()
+
+
+# =========================================================
+# PAGE: LEARNED PHRASES
+# Candidate phrasings the AI classifier (app.py's classifier lane) resolved
+# correctly even though NLP's own score_intent() missed them - grouped by
+# near-duplicate wording via the same word-overlap mechanism as Suggested
+# Additions above, sorted by how often each has been asked.
+#
+# Safety status is computed FRESH on every page load (nlp_helpers.
+# check_phrase_safety()), never cached - approving one candidate can
+# change the collision picture for another still pending review, so a
+# stored verdict would go stale and actively mislead.
+#
+# Approve edits nlp_helpers.py's INTENT_DATA directly on disk (Option A) -
+# this does NOT take effect until app.py is restarted, since the running
+# Flask process already has the OLD module loaded in memory. Said
+# explicitly next to the button below, unlike the Almanac editor's
+# genuinely-instant apply, so the two don't get confused. Option B (a
+# hot-reloadable phrases file, same mtime-based auto-reload pattern as
+# the almanac) is a deliberate future upgrade, not an oversight - see
+# gemini_rag.py's LEARNED PHRASES section for the full reasoning.
+# =========================================================
+elif page == "Learned Phrases":
+    st.title("🧠 Learned Phrases")
+    st.caption(
+        "Phrasings the AI classifier figured out that NLP's own scoring missed, sorted "
+        "by how often they've been asked. Approving one adds it to NLP's phrase list "
+        "directly, so it's answered instantly next time with no AI call needed."
+    )
+    st.warning(
+        "⚠️ **Approve edits nlp_helpers.py on disk, but does NOT take effect until the "
+        "app is restarted.** The running server already has the old phrase list loaded "
+        "in memory - this is not an instant-apply action like the Almanac editor."
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, phrase_text, resolved_intent, role, ask_count, first_asked, last_asked "
+        "FROM learned_phrases WHERE applied = 0 ORDER BY ask_count DESC, last_asked DESC"
+    )
+    candidates = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not candidates:
+        st.info("No learned-phrase candidates yet - once the AI classifier resolves something "
+                "NLP itself missed, it'll show up here.")
+    else:
+        for cid, phrase_text, resolved_intent, role, ask_count, first_asked, last_asked in candidates:
+            # Every role list that resolved_intent shows up in, unioned -
+            # so check_phrase_safety() can tell "conflicts with an intent
+            # that's actually scored alongside this one" apart from a
+            # same-named collision in an unrelated role's intent list.
+            same_role_intents = {
+                other for role_list in ROLE_PERSONAL_INTENTS.values()
+                if resolved_intent in role_list
+                for other in role_list if other != resolved_intent
+            }
+            status, reason = check_phrase_safety(phrase_text, resolved_intent, same_role_intents)
+            tag = "🟢 Safe to add" if status == "safe" else "🔴 Needs review"
+
+            with st.expander(f'({ask_count}x) "{phrase_text}" → {resolved_intent} [{role}] — {tag}'):
+                st.caption(f"First asked: {first_asked} · Last asked: {last_asked}")
+                if status == "safe":
+                    st.success("🟢 Safe to add — no collision found against any other intent.")
+                else:
+                    st.error(f"🔴 Needs review — {reason}")
+
+                col1, col2 = st.columns(2)
+                approve_clicked = col1.button("Approve", key=f"approve_btn_{cid}")
+                col1.caption("Takes effect after the next app restart.")
+                dismiss_clicked = col2.button("Dismiss", key=f"dismiss_btn_{cid}")
+
+                if approve_clicked:
+                    try:
+                        inserted = apply_phrase_to_intent_data(phrase_text, resolved_intent)
+                    except ValueError as e:
+                        st.error(f"Could not apply: {e}")
+                    else:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE learned_phrases SET applied=1 WHERE id=%s", (cid,))
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        if inserted:
+                            st.success(
+                                f'✅ Added "{phrase_text}" to \'{resolved_intent}\' in nlp_helpers.py. '
+                                "Restart the app for this to take effect."
+                            )
+                        else:
+                            st.info("Already present in nlp_helpers.py - marked resolved.")
+                        st.rerun()
+
+                if dismiss_clicked:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM learned_phrases WHERE id=%s", (cid,))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.warning("Dismissed.")
+                    st.rerun()
