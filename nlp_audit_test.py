@@ -232,6 +232,14 @@ BREAKING_INPUTS = [
     ("redirect:schedule-for-class-code", "principal", "Schedule for 10A"),
     ("redirect:teacher-for-class-code", "principal", "Who teaches 10A?"),
     ("redirect:subject-in-curriculum", "student", "What subjects does the school offer math?"),
+    # my_class's "my class" phrase collides with class_teacher_lookup's own
+    # "class teacher" phrase inside these - class_teacher_lookup isn't a
+    # student candidate intent at all (principal-only), so answer_student()
+    # redirects my_class -> class_teacher_lookup post-detection instead.
+    ("redirect:my-class-teacher-who-is", "student", "who is my class teacher"),
+    ("redirect:my-class-teacher-name", "student", "my class teacher name"),
+    ("redirect:my-class-teacher-tell-me", "student", "tell me my class teacher"),
+    ("class-teacher-lookup-with-code", "principal", "class teacher for 10-B"),
     # HOD department-scoped intents, empirically checked for collisions
     # against the full hod bucket (teacher intents + these) before shipping.
     ("hod:department-free-teachers", "hod", "which teachers in my department are free"),

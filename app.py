@@ -2121,12 +2121,17 @@ def handle_school_wide_subject_teacher(question):
     return f"No teacher found for {subject}" + (f" in {cls}." if cls else ".")
 
 
-def handle_class_teacher_lookup(question):
+def handle_class_teacher_lookup(question, default_class=None):
     """Every subject-teacher pair for a class - "Class 10-A: Mathematics
     — Mr. X, Science — Ms. Y". Distinct from handle_classroom_occupant()
     (who's in THIS class right now) and handle_school_wide_subject_teacher()
-    (which teacher teaches a SUBJECT school-wide, not a class's roster)."""
-    cls = extract_class_from_question(question)
+    (which teacher teaches a SUBJECT school-wide, not a class's roster).
+
+    default_class: a student's own class (see answer_student()'s my_class ->
+    class_teacher_lookup redirect) - "who is my class teacher" names no
+    class code for extract_class_from_question() to find.
+    """
+    cls = extract_class_from_question(question) or default_class
     if not cls:
         return "Which class would you like to check? Please include the class (e.g. 10-A)."
 
@@ -2229,6 +2234,15 @@ def answer_student(question, student_id, forced_intent=None):
             and extract_subject_from_question(question, _known_subject_names()):
         intent = "subject_teacher"
 
+    # my_class's "my class" phrase also matches inside "who is my class
+    # teacher" - class_teacher_lookup isn't in this role's own candidate
+    # list (it's principal-only), so it never competes in scoring; a real
+    # "teacher" word alongside the class reference is a stronger signal of
+    # what's actually being asked. Same redirect-after-detection pattern as
+    # the subjects_offered check above, not a nlp_helpers.py scoring change.
+    if forced_intent is None and intent == "my_class" and re.search(r'\bteacher\b', question.lower()):
+        intent = "class_teacher_lookup"
+
     if intent == "greeting":
         return "Hi, I'm Nova! Ask me about your attendance, exams, timetable, or fees. 😊"
     elif intent == "thanks":
@@ -2280,6 +2294,13 @@ def answer_student(question, student_id, forced_intent=None):
 
     elif intent == "my_class":
         return handle_my_class(student_id)
+
+    elif intent == "class_teacher_lookup":
+        default_class = None
+        if not extract_class_from_question(question):
+            result = query("SELECT class FROM students WHERE student_id=%s", (student_id,), fetch=True)
+            default_class = result[0] if result else None
+        return handle_class_teacher_lookup(question, default_class=default_class)
 
     elif intent == "next_period":
         return handle_next_period(student_id)
