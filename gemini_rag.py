@@ -151,9 +151,58 @@ def search_almanac(question):
 
 
 def almanac_top_score(question):
-    
+
     scored = _score_almanac_sections(question)
     return scored[0][0] if scored else 0
+
+
+_NOTICE_STOPWORDS = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
+                     'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
+                     'can', 'you', 'tell', 'give', 'show', 'mean', 'about',
+                     'exactly'}
+
+
+def _score_notices(question, visible_roles):
+    if not visible_roles:
+        return []
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        conditions = ["target_roles='all'"] + ["FIND_IN_SET(%s, target_roles)"] * len(visible_roles)
+        cursor.execute(
+            f"SELECT title, body FROM notices WHERE ({' OR '.join(conditions)})",
+            tuple(visible_roles)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f'[NOTICES CONTEXT ERROR] {e}')
+        return []
+
+    cleaned_question = question.lower()
+    for ch in '?!.,':
+        cleaned_question = cleaned_question.replace(ch, '')
+    question_words = set(cleaned_question.split()) - _NOTICE_STOPWORDS
+
+    scored = []
+    for title, body in rows:
+        text = f"{title} {body}".lower()
+        score = sum(1 for word in question_words if word in text)
+        if score > 0:
+            scored.append((score, title, body))
+
+    scored.sort(reverse=True, key=lambda t: t[0])
+    return scored
+
+
+def search_notice_context(question, visible_roles):
+    scored = _score_notices(question, visible_roles)
+    if not scored:
+        return ''
+    _, title, body = scored[0]
+    return f"Recent notice — {title}: {body}"
 
 
 
@@ -530,14 +579,19 @@ def cache_answer(normalized_question, answer):
     print(f'[CACHE SIZE] {len(_cache)} entries')
 
 
-def gemini_answer(question):
+def gemini_answer(question, visible_roles=()):
     normalized = normalize_question(question)
 
-    cached = find_cached_answer(normalized)
-    if cached:
-        return cached
+    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
+    used_notice = bool(notice_context)
 
-    context = search_almanac(question)
+    if not used_notice:
+        cached = find_cached_answer(normalized)
+        if cached:
+            return cached
+
+    almanac_context = search_almanac(question)
+    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -571,21 +625,28 @@ def gemini_answer(question):
             log_unanswered_question(question)
         return answer
 
-    # Store in cache for next time - whichever provider actually answered.
-    cache_answer(normalized, answer)
+    if used_notice:
+        print(f'[CACHE SKIPPED] Notice-grounded answer not cached: {normalized}')
+    else:
+        cache_answer(normalized, answer)
     return answer
 
 
-def gemini_answer_stream(question):
+def gemini_answer_stream(question, visible_roles=()):
 
     normalized = normalize_question(question)
 
-    cached = find_cached_answer(normalized)
-    if cached:
-        yield cached
-        return
+    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
+    used_notice = bool(notice_context)
 
-    context = search_almanac(question)
+    if not used_notice:
+        cached = find_cached_answer(normalized)
+        if cached:
+            yield cached
+            return
+
+    almanac_context = search_almanac(question)
+    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -630,4 +691,7 @@ def gemini_answer_stream(question):
     if full_answer == NO_CONTEXT_MESSAGE or full_answer == GEMINI_DECLINED_PHRASE:
         log_unanswered_question(question)
     if full_answer and full_answer not in UNCACHEABLE_ANSWERS:
-        cache_answer(normalized, full_answer)
+        if used_notice:
+            print(f'[CACHE SKIPPED] Notice-grounded answer not cached: {normalized}')
+        else:
+            cache_answer(normalized, full_answer)
