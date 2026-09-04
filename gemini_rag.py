@@ -151,83 +151,9 @@ def search_almanac(question):
 
 
 def almanac_top_score(question):
-
+    
     scored = _score_almanac_sections(question)
     return scored[0][0] if scored else 0
-
-
-# =========================================================
-# NOTICES GROUNDING
-# A question ABOUT a specific notice ("what does the uniform change mean?")
-# is answered by Gemini, grounded on that notice's body - not a retrieval
-# of the notice itself (that's handle_notices() in app.py, a separate,
-# deterministic, no-LLM intent for "show me my notices"). Same word-overlap
-# technique as _score_almanac_sections(), applied to notices.title+body
-# instead of the almanac text.
-#
-# visible_roles is a plain set of target_roles tokens (e.g. {"teacher",
-# "hod"}), computed by app.py's _notice_visible_roles() and passed in as
-# data - this module has no import of app.py (would be circular; app.py
-# already imports FROM here) and doesn't need to know anything about the
-# role-hierarchy concepts (hod/vice_principal/assistant_principal) that
-# produced that set.
-# =========================================================
-_NOTICE_STOPWORDS = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
-                     'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
-                     'can', 'you', 'tell', 'give', 'show', 'mean', 'about',
-                     'exactly'}
-
-
-def _score_notices(question, visible_roles):
-    """[(score, title, body), ...] for every notice visible to
-    visible_roles, highest score first. Empty list on a DB error or if
-    nothing scores - same "fail quiet, not loud" reasoning as the rest of
-    this module's DB-touching helpers (log_unanswered_question() etc.):
-    a notices lookup hiccup should degrade to "no extra grounding found",
-    never break the almanac-only answer path that already works."""
-    if not visible_roles:
-        return []
-
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        conditions = ["target_roles='all'"] + ["FIND_IN_SET(%s, target_roles)"] * len(visible_roles)
-        cursor.execute(
-            f"SELECT title, body FROM notices WHERE ({' OR '.join(conditions)})",
-            tuple(visible_roles)
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f'[NOTICES CONTEXT ERROR] {e}')
-        return []
-
-    cleaned_question = question.lower()
-    for ch in '?!.,':
-        cleaned_question = cleaned_question.replace(ch, '')
-    question_words = set(cleaned_question.split()) - _NOTICE_STOPWORDS
-
-    scored = []
-    for title, body in rows:
-        text = f"{title} {body}".lower()
-        score = sum(1 for word in question_words if word in text)
-        if score > 0:
-            scored.append((score, title, body))
-
-    scored.sort(reverse=True, key=lambda t: t[0])
-    return scored
-
-
-def search_notice_context(question, visible_roles):
-    """The single best-matching notice's body as grounding context, or ''
-    if nothing scores - deliberately just ONE notice, not the almanac's
-    top-3: "inject THAT notice's body", not a dump of everything posted."""
-    scored = _score_notices(question, visible_roles)
-    if not scored:
-        return ''
-    _, title, body = scored[0]
-    return f"Recent notice — {title}: {body}"
 
 
 
@@ -323,21 +249,6 @@ def ask_groq(question, context):
 # through to the generic Gemini fallback.
 # =========================================================
 def classify_personal_intent(question, role, possible_intents):
-    """
-    Asks Groq to pick exactly one of possible_intents (the role-specific
-    list from app.py's ROLE_PERSONAL_INTENTS), or NONE if it's general
-    school information rather than something personal to this user.
-
-    Privacy boundary: sends only the question text, the role label, and the
-    intent names - never any student/personal data. Same boundary as the
-    Gemini/almanac lane.
-
-    Fails open: returns None (never raises) on NONE, a malformed response,
-    or any error - always means "fall through to the normal Gemini/almanac
-    lane". A classifier that's also uncertain must never force a guess
-    through, same principle as Suggested Additions' "nothing auto-applies"
-    rule.
-    """
     intent_list = "\n".join(f"- {name}" for name in possible_intents)
     prompt = f"""A {role} at a school is using a chatbot. Decide which ONE category their question belongs to.
 
@@ -383,16 +294,6 @@ Reply with ONLY the category name exactly as written above, or NONE. No explanat
 
 
 def ask_gemini(question, context):
-    """
-    Send the question + relevant almanac context to Gemini.
-    Gemini is instructed to ONLY answer from the provided context.
-
-    Raises on failure rather than swallowing it (this used to catch its own
-    exceptions and return API_ERROR_MESSAGE directly) - the caller
-    (gemini_answer) needs to see the real exception to tell a rate-limit
-    failure, which should fall back to Groq, apart from any other failure,
-    which shouldn't.
-    """
     if not context:
         return NO_CONTEXT_MESSAGE
 
@@ -405,12 +306,6 @@ def ask_gemini(question, context):
 
 
 def ask_gemini_stream(question, context):
-    """
-    Streaming twin of ask_gemini(). Yields text chunks as they arrive from
-    Gemini. Raises on failure, same reasoning as ask_gemini() - the caller
-    (gemini_answer_stream) needs the real exception to route a rate-limit
-    failure to Groq.
-    """
     if not context:
         yield NO_CONTEXT_MESSAGE
         return
@@ -515,28 +410,9 @@ def find_cached_answer(normalized_question):
     return None
 
 
-# These three must never be cached. NO_CONTEXT_MESSAGE/API_ERROR_MESSAGE:
-# caching a transient failure (a real 503 from Gemini, seen in testing)
-# would serve "contact the office" to every similar question for the full
-# TTL even after Gemini recovers. GEMINI_DECLINED_PHRASE has the same
-# problem plus a Suggested-Additions-specific one: caching it would skip
-# log_unanswered_question() on repeat askings (ask_count could never go
-# above 1), and keep serving early askers a stale refusal even after an
-# admin adds the real answer to the almanac.
 UNCACHEABLE_ANSWERS = {NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE, GEMINI_DECLINED_PHRASE}
 
 
-# =========================================================
-# SUGGESTED ADDITIONS
-# Tracks real content gaps - questions that resolved to NO_CONTEXT_MESSAGE
-# or GEMINI_DECLINED_PHRASE (not every Gemini-lane question) - so the
-# dashboard's "Suggested Additions" page can surface them for review.
-#
-# Deliberately never touches school_almanac.txt or routing logic on its
-# own - every addition still requires an admin to type the actual answer
-# and click Add in the dashboard, given this project's history of
-# ambiguous-keyword routing bugs from auto-applying changes.
-# =========================================================
 def log_unanswered_question(question):
     """
     Records (or, for a near-duplicate phrasing, increments) an unanswered
@@ -595,49 +471,7 @@ def log_unanswered_question(question):
         print(f'[UNANSWERED LOG ERROR] {e}')
 
 
-# =========================================================
-# LEARNED PHRASES
-# Same review-queue shape as Suggested Additions above, one step earlier
-# in the pipeline: this tracks questions the AI classifier (Option 3 -
-# see app.py's classifier lane) resolved correctly even though NLP's own
-# score_intent() missed them. A repeated phrasing here is a candidate to
-# promote directly into nlp_helpers.py's INTENT_DATA, so it's answered by
-# the instant NLP lane next time instead of costing a Groq call.
-#
-# Option A for now: dashboard.py's Approve action edits nlp_helpers.py's
-# source directly and requires an app restart to take effect - nothing
-# hot-reloads it, unlike the almanac. Option B (move INTENT_DATA phrases
-# into a hot-reloadable data file, same mtime-based auto-reload pattern as
-# get_almanac() above, so Approve applies instantly) is a deliberate
-# future upgrade, not an oversight - flagged here so a future session
-# doesn't "fix" the restart requirement by accident before deciding to.
-#
-# Nothing here applies automatically either - safety-checking (nlp_helpers.
-# check_phrase_safety()) only labels a candidate 'Safe to add' or 'Needs
-# review'; an admin still has to click Approve in the dashboard.
-# =========================================================
 def log_learned_phrase(question, intent, role):
-    """
-    Records (or, for a near-duplicate phrasing, increments) a classifier-
-    resolved candidate phrase in the learned_phrases table.
-
-    Same grouping mechanism as log_unanswered_question() - normalize_
-    question() + _normalized_word_set() + _overlap_score() at
-    CACHE_SIMILARITY_THRESHOLD (0.85) - but scoped to rows already
-    resolved to this SAME intent: two phrasings can share high word
-    overlap by coincidence ("how many periods left" / "how many teachers
-    left") without meaning the same thing, and INTENT_DATA is one global
-    dict keyed by intent name, not partitioned by role, so intent is the
-    only grouping key that actually matches what Approve would edit.
-
-    Only call this for a genuinely delivered answer - see app.py's
-    classifier lane, which skips this when the reply is itself one of
-    CLARIFICATION_CONFIG's clarifying prompts (the classifier picked an
-    intent, but the handler still had nothing to answer with).
-
-    Best-effort, same reasoning as log_unanswered_question(): a DB hiccup
-    here must never break the chat reply already being sent to the user.
-    """
     normalized = normalize_question(question)
     query_words = _normalized_word_set(normalized)
     if not query_words:
@@ -696,41 +530,14 @@ def cache_answer(normalized_question, answer):
     print(f'[CACHE SIZE] {len(_cache)} entries')
 
 
-def gemini_answer(question, visible_roles=()):
-    """
-    Main entry point — search almanac (+ notices, if a specific one is
-    matched) then ask Gemini, falling back to Groq automatically if Gemini
-    is specifically rate-limited (not for other kinds of failures, which
-    still show the normal error message).
-
-    visible_roles: target_roles tokens the asker's role can see notices
-    for (app.py's _notice_visible_roles()) - default () means "don't
-    search notices at all", so a caller that doesn't pass it gets the
-    exact old almanac-only behavior.
-
-    A matched notice bypasses the cache entirely, both read and write -
-    notices are role- and time-sensitive (posted/edited/deleted at any
-    time) in a way the mostly-static almanac isn't, and this cache has no
-    concept of "which role asked" in its key at all. Re-searching notices
-    on every call costs one extra query only for questions that don't
-    already hit the cache on almanac content alone.
-
-    If FORCE_GROQ is on, Gemini is skipped entirely and Groq answers every
-    time - a separate debug branch from the rate-limit fallback above, not
-    a change to it.
-    """
+def gemini_answer(question):
     normalized = normalize_question(question)
 
-    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
-    used_notice = bool(notice_context)
+    cached = find_cached_answer(normalized)
+    if cached:
+        return cached
 
-    if not used_notice:
-        cached = find_cached_answer(normalized)
-        if cached:
-            return cached
-
-    almanac_context = search_almanac(question)
-    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
+    context = search_almanac(question)
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -764,44 +571,21 @@ def gemini_answer(question, visible_roles=()):
             log_unanswered_question(question)
         return answer
 
-    if used_notice:
-        print(f'[CACHE SKIPPED] Notice-grounded answer not cached (role/time-sensitive): {normalized}')
-    else:
-        # Store in cache for next time - whichever provider actually answered.
-        cache_answer(normalized, answer)
+    # Store in cache for next time - whichever provider actually answered.
+    cache_answer(normalized, answer)
     return answer
 
 
-def gemini_answer_stream(question, visible_roles=()):
-    """
-    Streaming twin of gemini_answer(), used by app.py's /api/chat route -
-    see that function's docstring for the notices-grounding/cache-bypass
-    reasoning (visible_roles has the exact same meaning and default here).
+def gemini_answer_stream(question):
 
-    Cache hit and no-almanac-match both yield a single chunk with no API
-    call, so app.js always sees a stream of 1+ chunks regardless of whether
-    the reply actually streamed. A cache miss with context streams real
-    Gemini chunks and caches the assembled answer once done.
-
-    A mid-stream error yields API_ERROR_MESSAGE uncached - if real chunks
-    already reached the browser, they stay and the error is appended after
-    rather than replacing them (an SSE stream can't retract bytes already
-    sent). A rate limit mid-stream falls back to Groq as one appended
-    chunk, same reasoning. FORCE_GROQ skips Gemini entirely, one chunk.
-    """
     normalized = normalize_question(question)
 
-    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
-    used_notice = bool(notice_context)
+    cached = find_cached_answer(normalized)
+    if cached:
+        yield cached
+        return
 
-    if not used_notice:
-        cached = find_cached_answer(normalized)
-        if cached:
-            yield cached
-            return
-
-    almanac_context = search_almanac(question)
-    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
+    context = search_almanac(question)
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -846,7 +630,4 @@ def gemini_answer_stream(question, visible_roles=()):
     if full_answer == NO_CONTEXT_MESSAGE or full_answer == GEMINI_DECLINED_PHRASE:
         log_unanswered_question(question)
     if full_answer and full_answer not in UNCACHEABLE_ANSWERS:
-        if used_notice:
-            print(f'[CACHE SKIPPED] Notice-grounded answer not cached (role/time-sensitive): {normalized}')
-        else:
-            cache_answer(normalized, full_answer)
+        cache_answer(normalized, full_answer)
