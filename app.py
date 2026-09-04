@@ -31,9 +31,10 @@ import math
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
-from nlp_helpers import detect_intent, detect_intent_with_score
+from nlp_helpers import detect_intent, detect_intent_with_score, rank_intents
 from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent, log_learned_phrase
 from config import DB_CONFIG
+from validators import GRADE_SECTION_PATTERN, EARLY_YEARS_CLASSES
 import mysql.connector
 
 
@@ -45,14 +46,23 @@ import mysql.connector
 # =========================================================
 
 # Words that strongly signal a PERSONAL question (needs MySQL)
+# Bare pronoun words used to be padded with manual spaces (' i ', 'me ') as
+# a crude stand-in for word-boundary matching - still wrong both ways: 'me '
+# matched inside "extreme thing", 'mine' (no padding at all) matched inside
+# "determine"/"mineral", and ' i ' missed "who am i?" (no trailing space
+# before the '?'). Now matched via real \b-anchored regex - see
+# _PERSONAL_SIGNAL_PATTERNS below - which is also what makes this
+# consistent with nlp_helpers.has_personal_signal()'s own \b(my|i|me|mine)\b,
+# instead of two different mechanisms for the same concept.
 PERSONAL_SIGNALS = [
-    'my ', 'my ', ' i ', 'am i', 'do i', 'have i', 'i have',
-    'mine', 'me ', ' me,', 'i am', "i'm", 'show me my',
+    'my', 'i', 'am i', 'do i', 'have i', 'i have',
+    'mine', 'me', 'i am', "i'm", 'show me my',
     'what is my', 'what are my', "what's my",
     # "roll no"/"next period" etc. have no "my"/"I" at all, so a student
     # asking exactly that was routed to Gemini instead of NLP.
     'roll no', 'roll number', 'next period', 'next class',
 ]
+_PERSONAL_SIGNAL_PATTERNS = [re.compile(r'\b' + re.escape(s) + r'\b') for s in PERSONAL_SIGNALS]
 
 
 def is_personal_question(question):
@@ -63,13 +73,75 @@ def is_personal_question(question):
     — routes to Gemini + almanac.
     """
     q = question.lower()
-    return any(signal in q for signal in PERSONAL_SIGNALS)
+    return any(pattern.search(q) for pattern in _PERSONAL_SIGNAL_PATTERNS)
 
 
-# Teacher/principal questions are nearly always DB questions ("how many
+# Words/phrases that mark a question as asking about the SCHOOL'S rule, not
+# the asker's own record - "what is my attendance policy" is asking about
+# the POLICY (school-wide, lives in the almanac), not the asker's own
+# attendance percentage, even though it's grammatically possessive ("my").
+# Checked unconditionally in _nlp_lane_decision(), ahead of the personal-
+# pronoun protection - that protection exists specifically to stop pronoun'd
+# wording being misrouted to general knowledge, and this is the deliberate,
+# narrow exception to it: a pronoun must not force the personal-data lane
+# when policy-frame language is also present.
+POLICY_FRAME_SIGNALS = [
+    "policy", "policies", "structure", "rules", "regulations", "regulation",
+    "procedure", "procedures", "guideline", "guidelines",
+    "how does the school", "what is the school's", "what is the schools",
+]
+_POLICY_FRAME_PATTERNS = [re.compile(r'\b' + re.escape(s) + r'\b') for s in POLICY_FRAME_SIGNALS]
+
+
+def is_policy_framed(question):
+    """True if the question is asking about a school policy/rule rather than
+    a personal record - see POLICY_FRAME_SIGNALS above."""
+    q = question.lower()
+    return any(pattern.search(q) for pattern in _POLICY_FRAME_PATTERNS)
+
+
+# Role hierarchy: assistant_principal gets identical access to principal
+# (full school-wide data, no scoping). hod and vice_principal both get
+# everything a teacher sees plus their own department-scoped queries -
+# vice_principal is an explicit placeholder at hod-level access for now
+# (requirements TBD, to be upgraded later - see the task this came from).
+# Centralized here so a role's actual behavior is decided once, not
+# re-derived at every dispatch site below.
+PRINCIPAL_LIKE_ROLES = {"principal", "assistant_principal"}
+HOD_LIKE_ROLES = {"hod", "vice_principal"}
+
+
+def _effective_role(role):
+    """Maps a login role to the routing/intent bucket it behaves as -
+    'principal' or 'hod' for the roles those groups cover, otherwise the
+    role itself unchanged (student/teacher)."""
+    if role in PRINCIPAL_LIKE_ROLES:
+        return "principal"
+    if role in HOD_LIKE_ROLES:
+        return "hod"
+    return role
+
+
+def _notice_visible_roles(role):
+    """Which notices.target_roles tokens this login role should see -
+    additive, same "sees everything X sees, plus more" shape as
+    _effective_role() above, but a SET (not a single bucket): hod/
+    vice_principal see 'teacher'-targeted notices in addition to their own
+    'hod'-targeted ones, not INSTEAD of them (_effective_role() alone would
+    collapse them to just 'hod' and miss teacher-wide notices entirely).
+    target_roles='all' is checked separately by the caller, not folded in
+    here."""
+    if role in PRINCIPAL_LIKE_ROLES:
+        return {"principal"}
+    if role in HOD_LIKE_ROLES:
+        return {"teacher", "hod"}
+    return {role}  # student, teacher
+
+
+# Teacher/principal-tier questions are nearly always DB questions ("how many
 # students", "which classes are assigned") but rarely first-person, so
 # PERSONAL_SIGNALS alone would wrongly send them to Gemini.
-DB_FIRST_ROLES = {"teacher", "principal"}
+DB_FIRST_ROLES = {"teacher", "principal"} | HOD_LIKE_ROLES | PRINCIPAL_LIKE_ROLES
 
 # Phrases that clearly point at school-wide almanac content, not a
 # person's own records. Needed because nlp_helpers.py's timetable intent
@@ -141,13 +213,21 @@ def is_pure_greeting(question):
 # The intent names each role's answer_*() actually recognizes (mirrors the
 # possible_intents lists in answer_student/teacher/principal below), minus
 # greeting/thanks/help - those are already handled by is_pure_greeting().
+# Named separately (not just inline in ROLE_PERSONAL_INTENTS) so "hod" can
+# be built as "everything a teacher sees, plus its own department-scoped
+# intents" in code, not just in prose - see HOD_LIKE_ROLES above.
+TEACHER_INTENTS = ["period_count", "timetable", "classes_assigned", "next_class",
+                    "current_class", "free_periods", "periods_remaining", "teacher_identity",
+                    "notices", "subjects_offered"]
+HOD_DEPARTMENT_INTENTS = ["department_free_teachers", "department_schedule_today",
+                           "department_teacher_count"]
+
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
                 "roll_number", "my_class", "next_period", "subject_teacher",
                 "notices", "subjects_offered"],
-    "teacher": ["period_count", "timetable", "classes_assigned", "next_class",
-                "current_class", "free_periods", "periods_remaining", "teacher_identity",
-                "notices", "subjects_offered"],
+    "teacher": TEACHER_INTENTS,
+    "hod": TEACHER_INTENTS + HOD_DEPARTMENT_INTENTS,
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
                   "class_wise_count", "teacher_location", "classroom_occupant",
                   "free_teachers", "teacher_schedule_lookup", "class_timetable_lookup",
@@ -166,40 +246,149 @@ ROLE_PERSONAL_INTENTS = {
 ALMANAC_STRONG_MATCH_SCORE = 2
 NLP_PHRASE_MATCH_SCORE = 3
 
+# Ambiguity guard thresholds (see _nlp_lane_decision). A single top score is
+# only trustworthy if it's (a) not too weak on its own, and (b) clearly
+# ahead of the runner-up - ties used to be broken silently by list order
+# ("who is my teacher?" ties identity/subject_teacher at 1 each; "how many
+# teachers teach?" ties teacher_count_by_subject/total_teachers at 5 each).
+NLP_SCORE_FLOOR = 2
+NLP_MARGIN_THRESHOLD = 2
+
+# Short, human phrase per intent, for the ambiguity clarification message
+# ("Did you mean X or Y?"). Every intent that can appear in
+# ROLE_PERSONAL_INTENTS needs an entry here, or the clarification falls back
+# to the raw intent name.
+INTENT_DESCRIPTIONS = {
+    "attendance": "your attendance percentage",
+    "exam": "your upcoming exams",
+    "timetable": "your timetable",
+    "fee": "your fee status",
+    "period_count": "how many periods you have",
+    "classes_assigned": "which classes you're assigned to",
+    "total_students": "the total student count",
+    "total_teachers": "the total teacher count",
+    "class_wise_count": "a class-wise student breakdown",
+    "identity": "your own details",
+    "roll_number": "your roll number",
+    "my_class": "which class you're in",
+    "next_period": "your next period",
+    "subject_teacher": "who teaches you a subject",
+    "next_class": "your next class",
+    "current_class": "your current class",
+    "free_periods": "your free periods",
+    "periods_remaining": "how many periods you have left today",
+    "teacher_identity": "your own details",
+    "teacher_location": "where a teacher is right now",
+    "classroom_occupant": "who's teaching a class right now",
+    "free_teachers": "which teachers are free right now",
+    "teacher_schedule_lookup": "a teacher's schedule",
+    "class_timetable_lookup": "a class's timetable",
+    "school_wide_subject_teacher": "who teaches a subject school-wide",
+    "class_teacher_lookup": "a class's subject-teacher list",
+    "low_attendance_count": "students below the attendance threshold",
+    "pending_fees_count": "students with pending fees",
+    "teacher_count_by_subject": "how many teachers teach a subject",
+    "department_free_teachers": "which teachers in your department are free",
+    "department_schedule_today": "your department's schedule today",
+    "department_teacher_count": "how many teachers are in your department",
+    "notices": "the latest notices",
+    "subjects_offered": "which subjects the school offers",
+}
+
+
+def _ambiguity_clarification(intent_a, intent_b):
+    """'Did you mean X or Y?' using INTENT_DESCRIPTIONS, falling back to the
+    raw intent name for anything not covered there."""
+    desc_a = INTENT_DESCRIPTIONS.get(intent_a, intent_a)
+    desc_b = INTENT_DESCRIPTIONS.get(intent_b, intent_b)
+    return f"Did you mean {desc_a}, or {desc_b}?"
+
 
 def use_nlp_lane(question, role):
     """
-    True routes to the NLP lane, False means Gemini or the classifier gets
-    a turn. Plain-bool wrapper around _nlp_lane_decision() - see its
-    docstring for the full routing rationale (the AMBIGUOUS_KEYWORDS
-    collision fix, the almanac tie-break, the classifier's trigger rule).
+    True routes to the NLP lane, False means Gemini, the classifier, or a
+    clarification gets a turn. Plain-bool wrapper around
+    _nlp_lane_decision() - see its docstring for the full routing rationale
+    (the AMBIGUOUS_KEYWORDS collision fix, the almanac tie-break, the
+    classifier's trigger rule, the ambiguity-margin guard).
     """
     return _nlp_lane_decision(question, role)[0]
 
 
 def get_routing_decision(question, role):
     """
-    Public entry point for /api/chat's three-way routing split (NLP lane /
-    AI classifier lane / Gemini+almanac lane). Thin wrapper around
-    _nlp_lane_decision() - see its docstring for the full trigger rule.
+    Public entry point for /api/chat's routing split (NLP lane / AI
+    classifier lane / ambiguity clarification / Gemini+almanac lane). Thin
+    wrapper around _nlp_lane_decision() - see its docstring for the full
+    trigger rule.
 
     Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
-    nlp_score: int). Exactly one of use_nlp / try_classifier is ever True;
-    both False means go straight to Gemini. nlp_intent/nlp_score are for
-    logging only - whichever weak (or absent) NLP match, if any, existed
-    when the decision was made.
+    nlp_score: int, clarification: str|None). At most one of use_nlp /
+    try_classifier / (clarification is not None) is ever truthy; all falsy
+    means go straight to Gemini. nlp_intent/nlp_score are for logging only -
+    whichever weak (or absent) NLP match, if any, existed when the decision
+    was made. clarification, when not None, is the "Did you mean X or Y?"
+    text /api/chat should return directly instead of dispatching to any lane.
     """
     return _nlp_lane_decision(question, role)
 
 
+# Post-scoring adjustment, NOT a change to score_intent()'s general scoring
+# (that function has no DB access and stays subject-blind, as it should).
+# "how many teachers teach math" ties teacher_count_by_subject/total_teachers
+# 5-5 in rank_intents() even though "math" resolves to a real subject in the
+# DB - total_teachers has no subject slot to use that evidence with, so it
+# shouldn't be able to tie (or win) against an intent that does once a real
+# subject was actually named. Deliberately narrow: only the intents whose
+# handler actually looks up a subject via extract_subject_from_question()
+# are "subject slot" intents; everything else in a tie gets penalized.
+SUBJECT_SLOT_INTENTS = {"teacher_count_by_subject", "subject_teacher", "school_wide_subject_teacher"}
+SUBJECT_MISMATCH_PENALTY = 3
+
+
+def _apply_subject_scoring_adjustment(ranked, question):
+    """Re-scores `ranked` (rank_intents() output) when a real subject is
+    named in `question`: any intent without a subject slot is penalized so
+    a subject-slot intent already in the running wins outright instead of
+    tying. A no-op whenever `ranked` has no subject-slot/subject-blind mix
+    to disambiguate, or no real subject is actually named (a bare "how many
+    teachers teach?" must still fall through to its existing ambiguity
+    clarification - this only fires once a subject was genuinely resolved
+    against the DB, not on every principal question)."""
+    subject_slot_present = any(name in SUBJECT_SLOT_INTENTS for name, _ in ranked)
+    subject_blind_present = any(name not in SUBJECT_SLOT_INTENTS for name, _ in ranked)
+    if not (subject_slot_present and subject_blind_present):
+        return ranked
+    if not extract_subject_from_question(question, _known_subject_names()):
+        return ranked
+
+    adjusted = [
+        (name, score - SUBJECT_MISMATCH_PENALTY if name not in SUBJECT_SLOT_INTENTS else score)
+        for name, score in ranked
+    ]
+    adjusted.sort(key=lambda pair: -pair[1])
+    return adjusted
+
+
 def _nlp_lane_decision(question, role):
     """
-    Core three-way routing decision behind use_nlp_lane() (plain bool) and
+    Core routing decision behind use_nlp_lane() (plain bool) and
     get_routing_decision() (the full tuple) - one implementation so they
     can't drift apart.
 
     Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
-    nlp_score: int).
+    nlp_score: int, clarification: str|None).
+
+    AMBIGUITY GUARD: a raw top score from rank_intents() isn't trusted on
+    its own anymore. It must clear NLP_SCORE_FLOOR (too weak otherwise -
+    treated as no match, same as a genuine zero) AND beat the runner-up by
+    NLP_MARGIN_THRESHOLD (otherwise it's a coin-flip tie, not a confident
+    winner - "who is my teacher?" ties identity/subject_teacher at 1 each,
+    "how many teachers teach?" ties teacher_count_by_subject/total_teachers
+    at 5 each; list order used to silently decide both). A margin failure
+    returns a "Did you mean X or Y?" clarification instead of guessing -
+    checked BEFORE the phrase-match/pronoun/almanac logic below, since even
+    a phrase-backed score-3+ match must still clear this first.
 
     Asks NLP directly whether it recognizes the question as one of its own
     intents for this role, rather than gating on PERSONAL_SIGNALS pronouns
@@ -239,24 +428,43 @@ def _nlp_lane_decision(question, role):
     first that would just fail again and reach Gemini one step later anyway.
     """
     if is_pure_greeting(question):
-        return True, False, None, 0
+        return True, False, None, 0, None
+
+    # Policy-frame language wins outright, even over a possessive pronoun -
+    # see POLICY_FRAME_SIGNALS/is_policy_framed() above. Checked before the
+    # personal-pronoun protection below on purpose: "what is my attendance
+    # policy" must not reach the personal attendance-lookup handler just
+    # because it says "my".
+    if is_policy_framed(question):
+        return False, False, None, 0, None
 
     has_personal_pronoun = role not in DB_FIRST_ROLES and is_personal_question(question)
 
     if not has_personal_pronoun and is_general_knowledge_question(question):
-        return False, False, None, 0
+        return False, False, None, 0, None
 
-    intent, nlp_score = detect_intent_with_score(question, ROLE_PERSONAL_INTENTS.get(role, []))
+    ranked = rank_intents(question, ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
+    ranked = _apply_subject_scoring_adjustment(ranked, question)
+    intent, nlp_score = ranked[0] if ranked else (None, 0)
+
+    if intent is not None:
+        if nlp_score < NLP_SCORE_FLOOR:
+            # Too weak to trust at all - fall through exactly as a genuine
+            # zero score would (the classifier/almanac logic below still
+            # gets its normal chance), rather than NLP guessing on it.
+            intent, nlp_score = None, 0
+        elif len(ranked) > 1 and (nlp_score - ranked[1][1]) < NLP_MARGIN_THRESHOLD:
+            return False, False, None, 0, _ambiguity_clarification(ranked[0][0], ranked[1][0])
 
     # Phrase-backed match (score >= 3): trust it outright, no need to even
     # check the almanac - a real phrase match is strong enough evidence on
     # its own (and nlp_helpers.py's AMBIGUOUS_KEYWORDS fix already keeps
     # bare-keyword matches honest).
     if intent is not None and nlp_score >= NLP_PHRASE_MATCH_SCORE:
-        return True, False, intent, nlp_score
+        return True, False, intent, nlp_score, None
 
     if has_personal_pronoun and intent is not None:
-        return True, False, intent, nlp_score
+        return True, False, intent, nlp_score, None
 
     almanac_score = almanac_top_score(question)
     almanac_confident = almanac_score >= ALMANAC_STRONG_MATCH_SCORE and almanac_score >= nlp_score
@@ -267,17 +475,17 @@ def _nlp_lane_decision(question, role):
         # classifier's turn. Otherwise the weak match wins on its own
         # merits, same as before.
         if almanac_confident:
-            return False, True, intent, nlp_score
-        return True, False, intent, nlp_score
+            return False, True, intent, nlp_score, None
+        return True, False, intent, nlp_score, None
 
     # intent is None: a genuine zero, with or without personal-pronoun
     # wording. A confident almanac match still wins outright with no need
     # for the classifier; otherwise this is exactly the "neither lane
     # confident" gap the classifier exists to catch.
     if almanac_score >= ALMANAC_STRONG_MATCH_SCORE:
-        return False, False, None, 0
+        return False, False, None, 0, None
 
-    return False, True, None, 0
+    return False, True, None, 0, None
 
 app = Flask(__name__)
 
@@ -384,6 +592,21 @@ def query(sql, params=None, fetch=False, many=False):
         return None
 
 
+def _chatbot_enabled():
+    """Reads the system_settings.chatbot_enabled flag (stored as the
+    string 'true'/'false', not a real boolean column - see
+    setup_database.py). Missing row or a DB error both default to
+    enabled: a query failure here means the DB is unreachable, which
+    already breaks every other feature regardless of this flag, so there's
+    no real "fail safe by disabling" benefit to defaulting the other way -
+    and it matches the seeded default (generate_dummy_data.py inserts
+    'true')."""
+    result = query("SELECT value FROM system_settings WHERE `key`='chatbot_enabled'", fetch=True)
+    if result is None:
+        return True
+    return result[0] == "true"
+
+
 # =========================================================
 # HEALTH CHECK
 # Deliberately outside AUTH ROUTES and doesn't touch session/login at all -
@@ -439,20 +662,32 @@ def _build_profile(role, linked_id):
             "fees": info[4]
         }
 
-    elif role == "teacher":
+    elif role == "teacher" or role in HOD_LIKE_ROLES:
+        # hod/vice_principal log in AS a teacher record (their own linked_id
+        # is their own teacher_id, same mechanism as a plain teacher login) -
+        # same profile shape, plus their department name.
         info = query(
-            "SELECT name, subject, classes_assigned FROM teachers WHERE teacher_id=%s",
+            """SELECT te.name,
+                      COALESCE(GROUP_CONCAT(DISTINCT s.subject_name ORDER BY s.subject_name SEPARATOR ', '), ''),
+                      te.classes_assigned, d.name
+               FROM teachers te
+               LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id
+               LEFT JOIN subjects s ON ts.subject_id = s.subject_id
+               LEFT JOIN departments d ON te.department_id = d.department_id
+               WHERE te.teacher_id=%s
+               GROUP BY te.teacher_id, te.name, te.classes_assigned, d.name""",
             (linked_id,), fetch=True
         )
         if not info:
             return None
         return info[0], {
             "name": info[0], "subject": info[1],
-            "classes": info[2]
+            "classes": info[2], "department": info[3]
         }
 
-    else:  # principal
-        return "Principal", {"name": "Principal"}
+    else:  # principal, assistant_principal - identical access, distinct label
+        label = "Assistant Principal" if role == "assistant_principal" else "Principal"
+        return label, {"name": label}
 
 
 @app.route("/api/login", methods=["POST"])
@@ -547,6 +782,51 @@ def me():
     return jsonify({"logged_in": True, "role": session.get("role"), "profile": profile})
 
 
+# =========================================================
+# NOTIFICATIONS BADGE — visual only, not an NLP feature (see
+# handle_notices() for the actual chat-facing notices intent). Counts
+# recent, role-visible notices the user hasn't checked yet; "seen" is a
+# single per-user timestamp (users.last_seen_notices_at), not per-notice
+# read tracking - all this badge needs is a count, not which ones.
+# =========================================================
+@app.route("/api/notices-count")
+def notices_count():
+    if "user_id" not in session:
+        return jsonify({"count": 0})
+
+    role = session.get("role")
+    visible_roles = _notice_visible_roles(role)
+    conditions = ["target_roles='all'"] + ["FIND_IN_SET(%s, target_roles)"] * len(visible_roles)
+    result = query(
+        f"""SELECT COUNT(*) FROM notices n
+            WHERE n.date_posted >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+            AND n.notice_id > (SELECT last_seen_notice_id FROM users WHERE user_id=%s)
+            AND ({' OR '.join(conditions)})""",
+        tuple([session.get("user_id")] + list(visible_roles)),
+        fetch=True
+    )
+    return jsonify({"count": result[0] if result else 0})
+
+
+@app.route("/api/notices-seen", methods=["POST"])
+def notices_seen():
+    """Marks every notice posted so far as seen (bumps last_seen_notice_id
+    up to the current max) - called by the frontend when the user engages
+    with the notifications badge (see static/app.js), not tied to the NLP
+    notices intent firing internally. MAX(notice_id) defaults to 0 via
+    COALESCE when the table is empty, matching the column's own default -
+    an empty table already means "nothing to have seen"."""
+    if "user_id" not in session:
+        return jsonify({"success": False}), 401
+
+    query(
+        """UPDATE users SET last_seen_notice_id = COALESCE((SELECT MAX(notice_id) FROM notices), 0)
+           WHERE user_id=%s""",
+        (session.get("user_id"),)
+    )
+    return jsonify({"success": True})
+
+
 @app.route("/api/logout", methods=["POST"])
 def logout():
     session.clear()
@@ -559,16 +839,30 @@ def not_found(e):
 
 
 # =========================================================
-# SINGLE-TURN CLARIFICATION MEMORY
+# CLARIFICATION MEMORY
 # A handler that can't extract what it needs (no subject/class/teacher
 # named) asks a clarifying question instead of answering. Without this,
 # the student's next message - "umm math" - was routed as a brand new,
 # unrelated question and got a wrong answer instead of completing the one
-# they were actually answering. Scoped to exactly one follow-up message:
-# pending_clarification is popped from the session the moment the next
-# message arrives, whether or not it resolves anything, so a stale
-# clarification can never linger into a later, unrelated conversation.
+# they were actually answering.
+#
+# Generalized from an earlier 4-intent version: registers every handler
+# that can ask a clarifying question (all 8 - grep app.py for
+# `return "Which` to reconfirm the full set if a new one is ever added),
+# and stores richer state (resolved_slots/original_message/expires_at, not
+# just intent+role) so the resume path can do more than blindly retry the
+# bare follow-up text - see _resume_clarification_reply()'s merge-fallback
+# and _is_topic_switch() below.
+#
+# Still fundamentally single-turn by design: pending_clarification is
+# popped from the session the moment the next message arrives, whether or
+# not it resolves anything, so a stale clarification can never linger into
+# a later, unrelated conversation. expires_at is a second, time-based
+# backstop on top of that (a follow-up minutes late shouldn't resume
+# either), not a replacement for it.
 # =========================================================
+CLARIFICATION_TTL_SECONDS = 300
+
 CLARIFICATION_CONFIG = {
     "subject_teacher": {
         "role": "student",
@@ -586,10 +880,30 @@ CLARIFICATION_CONFIG = {
         "role": "principal",
         "prompt": "Which teacher's schedule would you like to see?",
     },
+    "teacher_count_by_subject": {
+        "role": "principal",
+        "prompt": "Which subject would you like the teacher count for?",
+    },
+    "teacher_location": {
+        "role": "principal",
+        "prompt": "Which teacher would you like to locate? Please include their name.",
+    },
+    "classroom_occupant": {
+        "role": "principal",
+        "prompt": "Which class would you like me to check who's in right now? Please include the class (e.g. 10-A).",
+    },
+    "class_timetable_lookup": {
+        "role": "principal",
+        "prompt": "Which class's timetable would you like to see? Please include the class (e.g. 10-A).",
+    },
 }
 # (role, exact clarifying text) -> intent. subject_teacher and school_wide_
 # subject_teacher share the same prompt text, but never the same role
-# (student-only vs. principal-only), so the pair stays unambiguous.
+# (student-only vs. principal-only), so the pair stays unambiguous. Every
+# OTHER prompt text here must be unique within a role, or this reverse
+# lookup can't tell two pending intents apart - see handle_classroom_
+# occupant()'s comment for the one collision that was actually found
+# (against class_teacher_lookup) and reworded to fix.
 _CLARIFICATION_BY_PROMPT = {
     (cfg["role"], cfg["prompt"]): intent for intent, cfg in CLARIFICATION_CONFIG.items()
 }
@@ -601,29 +915,129 @@ _CLARIFICATION_BY_PROMPT = {
 _CLARIFICATION_PROMPTS = {cfg["prompt"] for cfg in CLARIFICATION_CONFIG.values()}
 
 
-def _resume_clarification_reply(intent, question, linked_id):
-    """Re-runs the ORIGINAL handler on the follow-up message, so it
+def _resume_clarification_reply(intent, question, linked_id, original_message):
+    """
+    Re-runs the ORIGINAL handler on the follow-up message first, so it
     re-extracts its slot the exact same way it did the first time - no
-    separate extraction logic here to keep in sync with each handler's own."""
-    if intent == "subject_teacher":
-        return handle_subject_teacher(question, linked_id, _known_subject_names())
-    if intent == "school_wide_subject_teacher":
-        return handle_school_wide_subject_teacher(question)
-    if intent == "class_teacher_lookup":
-        return handle_class_teacher_lookup(question)
-    if intent == "teacher_schedule_lookup":
-        return handle_teacher_schedule_lookup(question)
-    return None
+    separate extraction logic here to keep in sync with each handler's own.
+
+    If that alone doesn't resolve it (the same clarifying prompt comes back
+    unchanged), retries once more with original_message merged in ahead of
+    the follow-up ("umm the science one" alone might not read as a subject
+    to extract_subject_from_question(), but "who teaches me umm the
+    science one" - the original question plus the follow-up - might).
+    """
+    def dispatch(q):
+        if intent == "subject_teacher":
+            return handle_subject_teacher(q, linked_id, _known_subject_names())
+        if intent == "school_wide_subject_teacher":
+            return handle_school_wide_subject_teacher(q)
+        if intent == "class_teacher_lookup":
+            return handle_class_teacher_lookup(q)
+        if intent == "teacher_schedule_lookup":
+            return handle_teacher_schedule_lookup(q)
+        if intent == "teacher_count_by_subject":
+            return handle_teacher_count_by_subject(q)
+        if intent == "teacher_location":
+            return handle_teacher_location(q)
+        if intent == "classroom_occupant":
+            return handle_classroom_occupant(q)
+        if intent == "class_timetable_lookup":
+            return handle_class_timetable_lookup(q)
+        return None
+
+    resumed = dispatch(question)
+    config = CLARIFICATION_CONFIG.get(intent)
+    if config and resumed == config["prompt"] and original_message:
+        resumed = dispatch(f"{original_message} {question}")
+    return resumed
 
 
-def _maybe_set_pending_clarification(role, reply):
+def _is_topic_switch(question, role, pending_intent):
+    """
+    True if the follow-up looks like its own fresh question rather than a
+    bare answer to a pending clarification - a '?' together with a
+    confident (phrase-backed, score >= NLP_PHRASE_MATCH_SCORE) match for
+    some OTHER intent is strong evidence the user moved on to something
+    else, not just answering what was asked.
+
+    Checked BEFORE attempting to resume, so e.g. "what's my exam schedule
+    for science?" (a fresh, self-contained exam question) doesn't get
+    wrongly swallowed by a pending subject_teacher clarification just
+    because "science" also happens to be a valid subject name that
+    handler's own extraction would have matched.
+    """
+    if "?" not in question:
+        return False
+    intent, score = detect_intent_with_score(question, ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
+    return intent is not None and intent != pending_intent and score >= NLP_PHRASE_MATCH_SCORE
+
+
+def _maybe_set_pending_clarification(role, reply, original_message):
     """Called after every NLP-lane/classifier-lane reply - if it's one of
-    the exact clarifying prompts above, remember what was asked so the
-    NEXT message can try to complete it instead of starting fresh."""
+    the exact clarifying prompts above, remember what was asked (plus the
+    ORIGINAL message, for _resume_clarification_reply()'s merge-fallback)
+    so the NEXT message can try to complete it instead of starting fresh."""
     intent = _CLARIFICATION_BY_PROMPT.get((role, reply))
     if intent:
-        session["pending_clarification"] = {"intent": intent, "role": role}
+        session["pending_clarification"] = {
+            "intent": intent,
+            "role": role,
+            "resolved_slots": {},
+            "original_message": original_message,
+            "expires_at": time.time() + CLARIFICATION_TTL_SECONDS,
+        }
         print(f'[CLARIFICATION SET] intent={intent} role={role}')
+
+
+def _dispatch_to_role_handler(role, question, linked_id, forced_intent=None):
+    """Routes to the right answer_*() for this role, applying the role-
+    hierarchy rules once instead of re-deciding them at both /api/chat call
+    sites: assistant_principal is identical to principal; hod and
+    vice_principal both get everything a teacher sees plus their own
+    department-scoped intents (see HOD_LIKE_ROLES/HOD_DEPARTMENT_INTENTS)."""
+    if role == "student":
+        return answer_student(question, linked_id, forced_intent=forced_intent)
+    if role == "teacher" or role in HOD_LIKE_ROLES:
+        extra = HOD_DEPARTMENT_INTENTS if role in HOD_LIKE_ROLES else None
+        return answer_teacher(question, linked_id, forced_intent=forced_intent, extra_intents=extra, role=role)
+    return answer_principal(question, forced_intent=forced_intent)  # principal, assistant_principal
+
+
+# =========================================================
+# PRINCIPAL-ONLY KILL SWITCH
+# A hold-to-confirm button in the chatbot UI, principal-only, that takes
+# the whole bot offline for every user at once - an emergency stop, not a
+# per-role access control (deliberately checks the LITERAL "principal"
+# role here, not _effective_role()/PRINCIPAL_LIKE_ROLES - assistant_principal
+# has identical DATA access elsewhere in this file, but this is a distinct,
+# narrower authority the task explicitly scoped to principal only).
+# Re-enabling is dashboard-only (see dashboard.py's System Status page) -
+# this endpoint only ever turns it off.
+# =========================================================
+@app.route("/api/system-status")
+def system_status():
+    """No auth - the frontend needs to check this before a user has even
+    logged in (on every page load) to decide whether to show the disabled
+    banner."""
+    return jsonify({"enabled": _chatbot_enabled()})
+
+
+@app.route("/api/kill-switch", methods=["POST"])
+def kill_switch():
+    if session.get("role") != "principal":
+        return jsonify({"error": "Forbidden."}), 403
+
+    data = request.get_json(silent=True) or {}
+    if data.get("action") != "disable":
+        return jsonify({"error": "Invalid action."}), 400
+
+    query("UPDATE system_settings SET value='false' WHERE `key`='chatbot_enabled'")
+    query(
+        "INSERT INTO system_logs (action, performed_by) VALUES (%s, %s)",
+        ("disable", session.get("user_id"))
+    )
+    return jsonify({"success": True, "enabled": False})
 
 
 # =========================================================
@@ -631,6 +1045,15 @@ def _maybe_set_pending_clarification(role, reply):
 # =========================================================
 @app.route("/api/chat", methods=["POST"])
 def chat():
+    # Absolute first check, before session/auth, NLP, DB lookups, or any
+    # LLM call - a globally disabled bot answers nothing for anyone,
+    # regardless of who's asking or whether they're even logged in.
+    if not _chatbot_enabled():
+        return jsonify({
+            "reply": "YaraBot is temporarily unavailable. Please contact the school administration.",
+            "disabled": True
+        })
+
     if "user_id" not in session:
         return jsonify({"error": "Not logged in."}), 401
 
@@ -651,17 +1074,31 @@ def chat():
     # message right after a clarifying question still gets answered.
     pending = session.pop("pending_clarification", None)
     if pending and pending.get("role") == role:
-        config = CLARIFICATION_CONFIG.get(pending.get("intent"))
-        resumed = (_resume_clarification_reply(pending.get("intent"), question_lower, linked_id)
-                   if config else None)
-        if resumed is not None and resumed != config["prompt"]:
-            print(f'[CLARIFICATION RESUMED] intent={pending["intent"]} role={role} '
-                  f'follow_up={question_lower!r}')
-            return jsonify({"reply": resumed})
-        print(f'[CLARIFICATION EXPIRED] intent={pending.get("intent")} role={role} '
-              f'follow_up={question_lower!r} -> falling through to normal routing')
+        pending_intent = pending.get("intent")
+        if time.time() > pending.get("expires_at", 0):
+            print(f'[CLARIFICATION SKIPPED] intent={pending_intent} role={role} '
+                  f'follow_up={question_lower!r} reason=expired -> falling through to normal routing')
+        elif _is_topic_switch(question_lower, role, pending_intent):
+            print(f'[CLARIFICATION SKIPPED] intent={pending_intent} role={role} '
+                  f'follow_up={question_lower!r} reason=topic-switch -> falling through to normal routing')
+        else:
+            config = CLARIFICATION_CONFIG.get(pending_intent)
+            resumed = (_resume_clarification_reply(
+                           pending_intent, question_lower, linked_id, pending.get("original_message"))
+                       if config else None)
+            if resumed is not None and resumed != config["prompt"]:
+                print(f'[CLARIFICATION RESUMED] intent={pending_intent} role={role} '
+                      f'follow_up={question_lower!r}')
+                return jsonify({"reply": resumed})
+            print(f'[CLARIFICATION EXPIRED] intent={pending_intent} role={role} '
+                  f'follow_up={question_lower!r} -> falling through to normal routing')
 
-    # THREE-LANE ROUTING:
+    # ROUTING:
+    # Lane 0: Ambiguity clarification - two (or more) intents scored too
+    #         close together to trust a silent winner (see
+    #         _nlp_lane_decision()'s NLP_SCORE_FLOOR/NLP_MARGIN_THRESHOLD).
+    #         Returns the "Did you mean X or Y?" text directly, no DB call,
+    #         no AI call.
     # Lane 1: Personal question → NLP + MySQL (private, personal data).
     #         Already instant (a single DB lookup), so it stays a normal
     #         JSON response - streaming would add complexity for no benefit
@@ -675,17 +1112,16 @@ def chat():
     #         reply appears incrementally instead of the user staring at
     #         the typing indicator for the whole round trip.
 
-    use_nlp, try_classifier, weak_intent, weak_score = get_routing_decision(question_lower, role)
+    use_nlp, try_classifier, weak_intent, weak_score, clarification = get_routing_decision(question_lower, role)
+
+    if clarification is not None:
+        print(f'[AMBIGUITY CLARIFICATION] Question: {question_lower} -> {clarification!r}')
+        return jsonify({"reply": clarification})
 
     if use_nlp:
         # Personal lane — use NLP + MySQL
         print(f'[NLP LANE] Question: {question_lower}')
-        if role == "student":
-            reply = answer_student(question_lower, linked_id)
-        elif role == "teacher":
-            reply = answer_teacher(question_lower, linked_id)
-        else:  # principal
-            reply = answer_principal(question_lower)
+        reply = _dispatch_to_role_handler(role, question_lower, linked_id)
 
         # If NLP couldn't recognize it even with personal words, fall back
         # to Gemini as a last resort. The answer is now genuinely coming
@@ -695,9 +1131,9 @@ def chat():
             # print() with UnicodeEncodeError on Windows (stdout defaults
             # to cp1252), which took down every NLP-miss request with a 500.
             print(f'[NLP MISS -> GEMINI FALLBACK] Question: {question_lower}')
-            return stream_gemini_reply(question_lower)
+            return stream_gemini_reply(question_lower, role)
 
-        _maybe_set_pending_clarification(role, reply)
+        _maybe_set_pending_clarification(role, reply, question_lower)
         return jsonify({"reply": reply})
 
     # CLASSIFIER LANE: fires whenever get_routing_decision() found NEITHER
@@ -719,7 +1155,7 @@ def chat():
         # required to hold regardless of what goes wrong inside the call.
         try:
             classified_intent = classify_personal_intent(
-                question_lower, role, ROLE_PERSONAL_INTENTS.get(role, [])
+                question_lower, role, ROLE_PERSONAL_INTENTS.get(_effective_role(role), [])
             )
         except Exception as e:
             print(f'[CLASSIFIER LANE ERROR] Question: {question_lower} -> {e}')
@@ -728,13 +1164,8 @@ def chat():
         if classified_intent is not None:
             print(f'[CLASSIFIER LANE] Question: {question_lower} -> {classified_intent} '
                   f'(NLP: {weak_intent!r} score {weak_score}, almanac not confident)')
-            if role == "student":
-                reply = answer_student(question_lower, linked_id, forced_intent=classified_intent)
-            elif role == "teacher":
-                reply = answer_teacher(question_lower, linked_id, forced_intent=classified_intent)
-            else:  # principal
-                reply = answer_principal(question_lower, forced_intent=classified_intent)
-            _maybe_set_pending_clarification(role, reply)
+            reply = _dispatch_to_role_handler(role, question_lower, linked_id, forced_intent=classified_intent)
+            _maybe_set_pending_clarification(role, reply, question_lower)
 
             # Learned Phrases: log only a genuine delivery - the classifier
             # picked an intent AND the handler actually answered, not a
@@ -747,10 +1178,10 @@ def chat():
         # fall through to the exact same Gemini/almanac lane as today.
 
     # General lane — use Gemini + almanac, streamed
-    return stream_gemini_reply(question_lower)
+    return stream_gemini_reply(question_lower, role)
 
 
-def stream_gemini_reply(question):
+def stream_gemini_reply(question, role):
     """
     Wraps gemini_answer_stream() as an SSE response so app.js can read
     chunks incrementally instead of waiting for the whole reply.
@@ -759,9 +1190,17 @@ def stream_gemini_reply(question):
     literal newline in the text can't be mistaken for the blank-line
     separator. A final "data: [DONE]\\n\\n" makes the end explicit rather
     than relying on the connection closing.
+
+    role -> _notice_visible_roles(role) before crossing into gemini_rag.py,
+    not the raw role itself - that module has no concept of this app's
+    role hierarchy (hod/vice_principal/assistant_principal) and shouldn't
+    need one just to know which notices are groundable for this question;
+    it only ever sees a plain set of target_roles tokens to match against.
     """
+    visible_roles = _notice_visible_roles(role)
+
     def generate():
-        for chunk in gemini_answer_stream(question):
+        for chunk in gemini_answer_stream(question, visible_roles):
             yield f"data: {json.dumps({'chunk': chunk})}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -903,31 +1342,94 @@ def extract_subject_from_question(question, known_subjects):
     return None
 
 
+def _teacher_ambiguity_clarification(headline_name, matches):
+    """'There are multiple teachers named X. Which one - X (Subject1,
+    Subject2), or Y (Subject3)?' - matches is [(teacher_id, name,
+    subjects), ...], subjects a comma-joined string (a teacher can teach
+    more than one) used as the disambiguator. Confirmed live and real, not
+    hypothetical: with ~130 real staff, two different teachers are both
+    actually named "Tariq Al-Rashid" in this school's own data."""
+    options = ", or ".join(f"{name} ({subjects})" for _, name, subjects in matches)
+    return f"There are multiple teachers named {headline_name}. Which one — {options}?"
+
+
 def extract_teacher_name_from_question(question, known_teachers):
     """
-    known_teachers: list of (teacher_id, name) tuples fetched from DB.
+    known_teachers: list of (teacher_id, name, subjects) tuples fetched
+    from DB - subjects a comma-joined string of everything that teacher
+    teaches, only ever used as opaque disambiguator text here (see
+    _teacher_ambiguity_clarification()).
 
     Checks every word in the stored name, not just the first one, skipping
     common titles. Found via live testing: this school's teacher names are
     stored with a leading title ("Mr Imdadullah"), so the original
     first-word-only check was matching "Mr" as the "first name" and never
     finding the teacher when a user just said their actual name.
+
+    Token-boundary matched, not a bare substring `in` check - a teacher
+    named "Ann" was matching inside "annual" ("Where is the annual
+    meeting?"), wrongly resolving a location question about a meeting into
+    one about a specific teacher.
+
+    Two-tier match, full name checked across ALL teachers before any
+    per-word fallback: a specific full-name match ("Krishna Gupta") is
+    confident evidence on its own and shouldn't be second-guessed just
+    because some OTHER teacher's first name also happens to be "Krishna" -
+    only genuine duplicates (two+ teachers matching at the SAME tier) count
+    as ambiguous.
+
+    Returns (teacher_id, name, clarification). Exactly one of teacher_id or
+    clarification is ever set (both None/None/None on no match at all) -
+    silently returning whichever teacher matched first, on a name that
+    isn't actually unique, is exactly the kind of guess this project keeps
+    finding bugs from.
     """
     q = question.lower()
-    for tid, name in known_teachers:
-        name_lower = name.lower().strip()
-        if name_lower and name_lower in q:
-            return tid, name
-        for word in name_lower.split():
+
+    full_name_matches = [
+        (tid, name, subjects) for tid, name, subjects in known_teachers
+        if name.lower().strip() and re.search(r'\b' + re.escape(name.lower().strip()) + r'\b', q)
+    ]
+    if full_name_matches:
+        if len(full_name_matches) == 1:
+            tid, name, _ = full_name_matches[0]
+            return tid, name, None
+        return None, None, _teacher_ambiguity_clarification(full_name_matches[0][1], full_name_matches)
+
+    word_matches = []
+    seen_ids = set()
+    for tid, name, subjects in known_teachers:
+        for word in name.lower().strip().split():
             word = word.strip(".")
-            if word and word not in TEACHER_NAME_TITLES and word in q:
-                return tid, name
-    return None, None
+            if word and word not in TEACHER_NAME_TITLES and re.search(r'\b' + re.escape(word) + r'\b', q):
+                if tid not in seen_ids:
+                    word_matches.append((tid, name, subjects))
+                    seen_ids.add(tid)
+                break
+
+    if not word_matches:
+        return None, None, None
+    if len(word_matches) == 1:
+        tid, name, _ = word_matches[0]
+        return tid, name, None
+    return None, None, _teacher_ambiguity_clarification(word_matches[0][1], word_matches)
 
 
 def extract_class_from_question(question):
-    """Finds a class code like '10-A' mentioned anywhere in the question."""
-    match = re.search(r'\b(\d{1,2})[\s-]?([A-Za-z])\b', question)
+    """
+    Finds a class code mentioned anywhere in the question - an early-years
+    standalone code ('Nursery'/'LKG'/'UKG') or a grade-section like '10-A'.
+    Shares its pattern with validate_class() (validators.py) and
+    has_class_code() (nlp_helpers.py) via GRADE_SECTION_PATTERN/
+    EARLY_YEARS_CLASSES - see validators.py for why these three are no
+    longer defined independently.
+    """
+    q_lower = question.lower()
+    for code in EARLY_YEARS_CLASSES:
+        if re.search(r'\b' + re.escape(code.lower()) + r'\b', q_lower):
+            return code
+
+    match = re.search(GRADE_SECTION_PATTERN, question)
     if match:
         return f"{match.group(1)}-{match.group(2).upper()}"
     return None
@@ -941,6 +1443,24 @@ def _known_subject_names():
     return [r[0] for r in rows]
 
 
+def _teachers_with_subjects():
+    """(teacher_id, name, subjects) for every teacher - subjects a
+    comma-joined string ("English, History") via teacher_subjects/subjects,
+    '' if a teacher has none on record. Feeds
+    extract_teacher_name_from_question()'s disambiguation (a teacher can
+    now teach more than one subject, see teacher_subjects in
+    setup_database.py) - shared by every handler that needs to match a
+    named teacher in a question."""
+    return query("""
+        SELECT te.teacher_id, te.name,
+               COALESCE(GROUP_CONCAT(DISTINCT s.subject_name ORDER BY s.subject_name SEPARATOR ', '), '')
+        FROM teachers te
+        LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id
+        LEFT JOIN subjects s ON ts.subject_id = s.subject_id
+        GROUP BY te.teacher_id, te.name
+    """, fetch=True, many=True) or []
+
+
 # =========================================================
 # NLP EXPANSION — shared across all three roles
 # Notices/subjects_offered aren't personal to any one student/teacher, and
@@ -950,20 +1470,57 @@ def _known_subject_names():
 # verbatim from all three of answer_student()/answer_teacher()/
 # answer_principal() below.
 # =========================================================
-def handle_notices():
-    """Returns the most recent notices posted via the dashboard, newest
-    first, capped at 5 so a long history doesn't flood the chat."""
-    results = query(
-        """SELECT title, body, date_posted FROM notices
-           ORDER BY date_posted DESC, notice_id DESC LIMIT 5""",
-        fetch=True, many=True
-    )
+_NOTICE_URGENT_RE = re.compile(r'\burgent\b')
+_NOTICE_OLD_RE = re.compile(r'\bold(er)?\b')
+
+
+def _extract_notice_filters(question):
+    """(urgent_only, offset) from the question text - "any urgent notices"
+    filters to priority='urgent'; "old"/"older announcements" shows the
+    NEXT batch after the latest 5 (rows 6-10) instead of the most recent
+    ones. A one-shot text signal, not a stateful pagination cursor - "old
+    announcements" always means rows 6-10, asked fresh or as a follow-up,
+    which is simpler and doesn't need any session-state tracking to satisfy
+    "the option to ask for older ones"."""
+    q = question.lower()
+    urgent_only = bool(_NOTICE_URGENT_RE.search(q))
+    offset = 5 if _NOTICE_OLD_RE.search(q) else 0
+    return urgent_only, offset
+
+
+PRIORITY_ICONS = {"urgent": "🔴 ", "important": "🟡 ", "normal": ""}
+
+
+def handle_notices(role, question):
+    """Notices visible to `role` (see _notice_visible_roles()), newest
+    first, capped at 5 per batch so a long history doesn't flood the chat -
+    "old"/"older" in the question shows the next batch instead of the
+    first, "urgent" filters to priority='urgent' only (see
+    _extract_notice_filters())."""
+    urgent_only, offset = _extract_notice_filters(question)
+    visible_roles = _notice_visible_roles(role)
+
+    conditions = ["target_roles='all'"] + ["FIND_IN_SET(%s, target_roles)"] * len(visible_roles)
+    sql = f"SELECT title, body, date_posted, priority FROM notices WHERE ({' OR '.join(conditions)})"
+    params = list(visible_roles)
+    if urgent_only:
+        sql += " AND priority='urgent'"
+    sql += " ORDER BY date_posted DESC, notice_id DESC LIMIT 5 OFFSET %s"
+    params.append(offset)
+
+    results = query(sql, tuple(params), fetch=True, many=True)
 
     if not results:
-        return "No notices posted at the moment."
+        if urgent_only:
+            return "No urgent notices right now." if offset == 0 else "No older urgent notices found."
+        return "No notices posted at the moment." if offset == 0 else "No older notices found."
 
-    lines = [f"**{title}** ({date_posted})\n{body}" for title, body, date_posted in results]
-    return "📢 Latest notices:\n\n" + "\n\n".join(lines)
+    lines = [
+        f"{PRIORITY_ICONS.get(priority, '')}**{title}** ({date_posted})\n{body}"
+        for title, body, date_posted, priority in results
+    ]
+    header = "Urgent notices" if urgent_only else "Older notices" if offset else "Latest notices"
+    return f"📢 {header}:\n\n" + "\n\n".join(lines)
 
 
 def handle_subjects_offered(question):
@@ -1256,13 +1813,100 @@ def handle_teacher_periods_remaining(teacher_id):
 
 def handle_teacher_identity(teacher_id):
     result = query(
-        "SELECT name, subject FROM teachers WHERE teacher_id=%s",
+        """SELECT te.name,
+                  COALESCE(GROUP_CONCAT(DISTINCT s.subject_name ORDER BY s.subject_name SEPARATOR ', '), '')
+           FROM teachers te
+           LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id
+           LEFT JOIN subjects s ON ts.subject_id = s.subject_id
+           WHERE te.teacher_id=%s
+           GROUP BY te.teacher_id, te.name""",
         (teacher_id,), fetch=True
     )
     if result:
-        name, subject = result
-        return f"You're **{name}**, {subject} teacher."
+        name, subjects = result
+        if not subjects:
+            return f"You're **{name}**. No subject is on record for you yet."
+        return f"You're **{name}**, teaching **{subjects}**."
     return "I couldn't find your details."
+
+
+# =========================================================
+# HOD EXPANSION — department-scoped versions of the principal-tier
+# free_teachers/total_teachers/schedule-lookup handlers, filtered down to
+# the asking HOD's own department. Dispatched from answer_teacher() (see
+# HOD_DEPARTMENT_INTENTS) - vice_principal reuses these unchanged too
+# (hod-level access placeholder, see _effective_role()).
+# =========================================================
+def _hod_department_id(teacher_id):
+    """The department_id on this HOD's own teacher record, or None if
+    they don't have one assigned yet. Shared by all three handlers below."""
+    result = query("SELECT department_id FROM teachers WHERE teacher_id=%s", (teacher_id,), fetch=True)
+    return result[0] if result else None
+
+
+def handle_department_free_teachers(teacher_id):
+    """Department-scoped version of handle_free_teachers() - every teacher
+    in the HOD's own department with no class scheduled this period."""
+    department_id = _hod_department_id(teacher_id)
+    if not department_id:
+        return "You don't have a department on record yet."
+
+    today = datetime.datetime.now().strftime("%A")
+    current_period = estimate_current_period_number()
+
+    dept_teachers = query(
+        "SELECT teacher_id, name FROM teachers WHERE department_id=%s",
+        (department_id,), fetch=True, many=True
+    ) or []
+    if not dept_teachers:
+        return "No teachers are assigned to your department yet."
+
+    busy = query("""
+        SELECT DISTINCT teacher_id FROM timetable
+        WHERE day = %s AND period_no = %s
+    """, (today, current_period), fetch=True, many=True) or []
+    busy_ids = {row[0] for row in busy}
+    free = [name for tid, name in dept_teachers if tid not in busy_ids]
+
+    if free:
+        return f"Free teachers in your department right now: **{', '.join(free)}**."
+    return "Every teacher in your department is currently in class."
+
+
+def handle_department_schedule_today(teacher_id):
+    """Every teacher in the HOD's department, scheduled periods for today -
+    department-scoped equivalent of a class timetable lookup."""
+    department_id = _hod_department_id(teacher_id)
+    if not department_id:
+        return "You don't have a department on record yet."
+
+    today = datetime.datetime.now().strftime("%A")
+    results = query("""
+        SELECT te.name, t.period_no, s.subject_name, t.class
+        FROM timetable t
+        JOIN teachers te ON t.teacher_id = te.teacher_id
+        JOIN subjects s ON t.subject_id = s.subject_id
+        WHERE te.department_id = %s AND t.day = %s
+        ORDER BY te.name, t.period_no
+    """, (department_id, today), fetch=True, many=True)
+
+    if not results:
+        return f"No classes scheduled for your department on **{today}**."
+
+    lines = [f"- **{name}**, Period {p}: {subj} *({cls})*" for name, p, subj, cls in results]
+    return f"Your department's schedule for **{today}**:\n" + "\n".join(lines)
+
+
+def handle_department_teacher_count(teacher_id):
+    """How many teachers are in the HOD's own department - department-
+    scoped equivalent of total_teachers."""
+    department_id = _hod_department_id(teacher_id)
+    if not department_id:
+        return "You don't have a department on record yet."
+
+    result = query("SELECT COUNT(*) FROM teachers WHERE department_id=%s", (department_id,), fetch=True)
+    count = result[0] if result else 0
+    return f"There are **{count} teacher(s)** in your department."
 
 
 def handle_teacher_timetable(question, teacher_id):
@@ -1304,9 +1948,11 @@ def handle_teacher_timetable(question, teacher_id):
 # =========================================================
 def handle_teacher_location(question):
     """Where is a specific teacher right now (which class, if any)."""
-    teachers = query("SELECT teacher_id, name FROM teachers", fetch=True, many=True) or []
-    tid, name = extract_teacher_name_from_question(question, teachers)
+    teachers = _teachers_with_subjects()
+    tid, name, clarification = extract_teacher_name_from_question(question, teachers)
 
+    if clarification:
+        return clarification
     if not tid:
         return "Which teacher would you like to locate? Please include their name."
 
@@ -1328,7 +1974,12 @@ def handle_classroom_occupant(question):
     cls = extract_class_from_question(question)
 
     if not cls:
-        return "Which class would you like to check? Please include the class (e.g. 10-A)."
+        # Deliberately worded differently from class_teacher_lookup's own
+        # "which class" prompt below - the two used to be byte-identical,
+        # which would have made them indistinguishable once both got
+        # registered in CLARIFICATION_CONFIG (that dict resolves a pending
+        # follow-up by matching the exact prompt text back to an intent).
+        return "Which class would you like me to check who's in right now? Please include the class (e.g. 10-A)."
 
     today = datetime.datetime.now().strftime("%A")
     current_period = estimate_current_period_number()
@@ -1368,9 +2019,11 @@ def handle_free_teachers():
 
 def handle_teacher_schedule_lookup(question):
     """Full schedule (or day-filtered) for a specific named teacher."""
-    teachers = query("SELECT teacher_id, name FROM teachers", fetch=True, many=True) or []
-    tid, name = extract_teacher_name_from_question(question, teachers)
+    teachers = _teachers_with_subjects()
+    tid, name, clarification = extract_teacher_name_from_question(question, teachers)
 
+    if clarification:
+        return clarification
     if not tid:
         return "Which teacher's schedule would you like to see?"
 
@@ -1526,22 +2179,25 @@ def handle_pending_fees_count():
 
 
 def handle_teacher_count_by_subject(question):
-    """How many teachers teach a given subject, school-wide."""
-    result = query("SELECT DISTINCT subject FROM teachers", fetch=True, many=True) or []
-    known_subjects = [r[0] for r in result]
-    subject = extract_subject_from_question(question, known_subjects)
+    """How many teachers teach a given subject, school-wide. A teacher can
+    now teach more than one subject (teacher_subjects join table, see
+    setup_database.py) - COUNT(DISTINCT teacher_id) so a teacher who also
+    teaches something else isn't double-counted against this one subject."""
+    subject = extract_subject_from_question(question, _known_subject_names())
 
     if not subject:
         return "Which subject would you like the teacher count for?"
 
-    # TRIM() on both sides, not a plain "=": found via live testing that
-    # teachers.subject has whitespace-duplicated rows for the same real
-    # subject ('Computer Science' and 'Computer Science ' as DISTINCT
-    # values - 3 teachers vs 1). An exact match against whichever variant
-    # extract_subject_from_question happened to pick undercounted (1
-    # instead of the real 4). TRIM() treats both as the same subject.
+    # TRIM() on both sides, not a plain "=": subjects.subject_name has had
+    # whitespace-duplicated rows for the same real subject in the past
+    # ('Computer Science' vs 'Computer Science ' as DISTINCT values) - an
+    # exact match against whichever variant extract_subject_from_question
+    # happened to pick would undercount.
     count_result = query(
-        "SELECT COUNT(*) FROM teachers WHERE TRIM(subject) = TRIM(%s)",
+        """SELECT COUNT(DISTINCT ts.teacher_id)
+           FROM teacher_subjects ts
+           JOIN subjects s ON ts.subject_id = s.subject_id
+           WHERE TRIM(s.subject_name) = TRIM(%s)""",
         (subject,), fetch=True
     )
     count = count_result[0] if count_result else 0
@@ -1633,7 +2289,7 @@ def answer_student(question, student_id, forced_intent=None):
         return handle_subject_teacher(question, student_id, known_subjects)
 
     elif intent == "notices":
-        return handle_notices()
+        return handle_notices("student", question)
 
     elif intent == "subjects_offered":
         return handle_subjects_offered(question)
@@ -1642,13 +2298,23 @@ def answer_student(question, student_id, forced_intent=None):
             "**attendance**, **exams**, **timetable**, **fees**, or your **details**.")
 
 
-def answer_teacher(question, teacher_id, forced_intent=None):
+def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None, role="teacher"):
     # forced_intent: see answer_student()'s matching comment above.
+    # extra_intents: HOD_DEPARTMENT_INTENTS when this is really an hod/
+    # vice_principal login (see _dispatch_to_role_handler) - a plain
+    # teacher is never passed any, so those intents can never be detected
+    # for one.
+    # role: the REAL login role (teacher/hod/vice_principal), needed only
+    # for handle_notices()'s role-scoped visibility - hod/vice_principal
+    # see more notices than a plain teacher even though every other branch
+    # in this function treats all three identically. Defaults to "teacher"
+    # so existing callers (e.g. nlp_audit_test.py) that don't pass it are
+    # unaffected.
     intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
          "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
-         "notices", "subjects_offered"]
+         "notices", "subjects_offered"] + (extra_intents or [])
     )
 
     if intent == "greeting":
@@ -1656,6 +2322,11 @@ def answer_teacher(question, teacher_id, forced_intent=None):
     elif intent == "thanks":
         return "You're welcome! 👍"
     elif intent == "help":
+        department_help = (
+            "\n🏢 **Department** — *'which teachers in my department are free'*, "
+            "*'my department's schedule today'*, *'how many teachers are in my department'*"
+            if extra_intents else ""
+        )
         return ("Hi, I'm Nova! Here's what I can help with:\n"
                 "🕐 **Schedule** — *'show my timetable'* (add a day, e.g. 'Monday' or 'today')\n"
                 "📊 **Periods** — *'how many periods do I have'*\n"
@@ -1664,7 +2335,7 @@ def answer_teacher(question, teacher_id, forced_intent=None):
                 "🆓 **Free periods** — *'am I free right now'*, *'free periods today'*\n"
                 "⏳ **Periods left today** — *'how many periods do I have left'*\n"
                 "🙋 **My details** — *'who am i'*\n"
-                "📢 **Notices** — *'any announcements'*")
+                "📢 **Notices** — *'any announcements'*" + department_help)
 
     if intent == "period_count":
         # "periods today" is one of this intent's own phrases, so without
@@ -1715,30 +2386,43 @@ def answer_teacher(question, teacher_id, forced_intent=None):
         return handle_teacher_identity(teacher_id)
 
     elif intent == "notices":
-        return handle_notices()
+        return handle_notices(role, question)
 
     elif intent == "subjects_offered":
         return handle_subjects_offered(question)
+
+    elif intent == "department_free_teachers":
+        return handle_department_free_teachers(teacher_id)
+
+    elif intent == "department_schedule_today":
+        return handle_department_schedule_today(teacher_id)
+
+    elif intent == "department_teacher_count":
+        return handle_department_teacher_count(teacher_id)
 
     return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
 
 
 def answer_principal(question, forced_intent=None):
     # forced_intent: see answer_student()'s matching comment above.
-    intent = forced_intent if forced_intent is not None else detect_intent(
-        question,
-        ["greeting", "thanks", "help",
-         # More specific intents listed first: detect_intent() keeps
-         # whichever wins a tie by being checked FIRST, and "how many
-         # teachers teach math" ties 4-4 between total_teachers and
-         # teacher_count_by_subject. A plain "how many teachers" still
-         # resolves to total_teachers on its own merits either way (4 vs 1).
-         "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
-         "teacher_location", "classroom_occupant", "free_teachers",
-         "teacher_schedule_lookup", "class_timetable_lookup",
-         "school_wide_subject_teacher", "class_teacher_lookup",
-         "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"]
-    )
+    if forced_intent is not None:
+        intent = forced_intent
+    else:
+        # rank_intents() + _apply_subject_scoring_adjustment(), not
+        # detect_intent(): "how many teachers teach math" ties
+        # teacher_count_by_subject/total_teachers, and the adjustment is
+        # what actually resolves that now instead of relying on
+        # teacher_count_by_subject happening to be listed first below.
+        principal_ranked = rank_intents(question, [
+            "greeting", "thanks", "help",
+            "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
+            "teacher_location", "classroom_occupant", "free_teachers",
+            "teacher_schedule_lookup", "class_timetable_lookup",
+            "school_wide_subject_teacher", "class_teacher_lookup",
+            "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"
+        ])
+        principal_ranked = _apply_subject_scoring_adjustment(principal_ranked, question)
+        intent = principal_ranked[0][0] if principal_ranked else None
 
     # teacher_schedule_lookup's "schedule for" and school_wide_subject_
     # teacher's "who teaches" phrases also match a class-code question
@@ -1751,9 +2435,13 @@ def answer_principal(question, forced_intent=None):
     # the classifier already makes this distinction itself.
     if forced_intent is None and extract_class_from_question(question):
         if intent == "teacher_schedule_lookup":
-            teachers = query("SELECT teacher_id, name FROM teachers", fetch=True, many=True) or []
-            tid, _ = extract_teacher_name_from_question(question, teachers)
-            if not tid:
+            teachers = _teachers_with_subjects()
+            tid, _, clarification = extract_teacher_name_from_question(question, teachers)
+            # A real (if ambiguous) teacher reference was found - let it
+            # through to handle_teacher_schedule_lookup(), which will
+            # re-extract and surface the same disambiguation itself. Only
+            # redirect when NEITHER a teacher NOR an ambiguity was found.
+            if not tid and not clarification:
                 intent = "class_timetable_lookup"
         elif intent == "school_wide_subject_teacher":
             if not extract_subject_from_question(question, _known_subject_names()):
@@ -1843,7 +2531,7 @@ def answer_principal(question, forced_intent=None):
         return handle_teacher_count_by_subject(question)
 
     elif intent == "notices":
-        return handle_notices()
+        return handle_notices("principal", question)
 
     elif intent == "subjects_offered":
         return handle_subjects_offered(question)

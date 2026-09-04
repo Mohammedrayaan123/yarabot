@@ -12,30 +12,62 @@ import re
 
 
 def validate_name(name):
-    """Name must be non-empty and contain only letters and spaces."""
+    """
+    Name must be 2-100 chars, Unicode letters plus hyphens/apostrophes/
+    periods/spaces (e.g. "Al-Rashid", "O'Brien", Arabic-script names), and
+    contain at least one actual letter - not purely numbers or punctuation.
+    """
     name = name.strip()
     if not name:
         return False, "Name cannot be empty."
-    if not re.match(r"^[A-Za-z\s]+$", name):
-        return False, "Name should only contain letters and spaces."
     if len(name) < 2:
         return False, "Name is too short."
+    if len(name) > 100:
+        return False, "Name is too long (max 100 characters)."
+    if not re.match(r"^[\w\-'.\s]+$", name, re.UNICODE):
+        return False, "Name should only contain letters, spaces, hyphens, apostrophes, or periods."
+    # \w includes digits, so a bare check above lets "123" or "12-34" through -
+    # strip everything but letters and see if anything real is left.
+    letters_only = re.sub(r"[\d\-'.\s]", "", name, flags=re.UNICODE)
+    if not letters_only:
+        return False, "Name must contain at least one letter."
     return True, ""
+
+
+# Single source of truth for the class-code shape, shared with
+# extract_class_from_question() (app.py) and has_class_code() (nlp_helpers.py) -
+# both import these two names from here instead of keeping their own copies.
+# They used to be defined independently and had already drifted (this pattern
+# allows a space OR no separator - "10 A"/"10A" - which the old validate_class
+# rejected but the other two already accepted); importing one shared pattern
+# is what stops that happening again.
+GRADE_SECTION_PATTERN = r"\b(\d{1,2})[\s-]?([A-Za-z])\b"
+
+# Standalone early-years codes - no grade number, no section letter. See
+# school_almanac.txt's own "Grades offered: Kindergarten (Nursery, LKG, UKG)
+# through Grade XII" - the old 1-12-only range had no way to represent these.
+EARLY_YEARS_CLASSES = ["Nursery", "LKG", "UKG"]
 
 
 def validate_class(class_str):
     """
-    Class must follow the pattern: number-letter (e.g. 10-A, 6-B, 12-F).
-    Grade must be between 1 and 12.
-    Section must be a single uppercase letter.
+    Class must be one of the early-years standalone codes (Nursery/LKG/UKG,
+    case-insensitive, no section) or Grade-Section for grades 1-12 (e.g.
+    10-A, 6 B, 12F - hyphen, space, or no separator all accepted).
     """
-    class_str = class_str.strip().upper()
+    class_str = class_str.strip()
     if not class_str:
         return False, "Class cannot be empty."
-    pattern = r"^(\d{1,2})-([A-Z])$"
-    match = re.match(pattern, class_str)
+
+    if class_str.lower() in (c.lower() for c in EARLY_YEARS_CLASSES):
+        return True, ""
+
+    match = re.fullmatch(GRADE_SECTION_PATTERN, class_str.upper())
     if not match:
-        return False, "Class must be in the format 'Grade-Section' (e.g. 10-A, 6-B)."
+        return False, (
+            "Class must be 'Nursery', 'LKG', 'UKG', or 'Grade-Section' "
+            "(e.g. 10-A, 6-B)."
+        )
     grade = int(match.group(1))
     if grade < 1 or grade > 12:
         return False, "Grade must be between 1 and 12."
@@ -43,14 +75,21 @@ def validate_class(class_str):
 
 
 def validate_contact(contact):
-    """Contact number must be exactly 10 digits."""
+    """
+    Contact number, after stripping hyphens/spaces/parentheses, must be an
+    optional '+' or '00' international prefix followed by 7-15 digits - a
+    plain 10-digit number (the old rule) still passes, but so does the
+    school's own real Saudi format ("00966-11-2869960", "+966592888865").
+    """
     contact = contact.strip()
     if not contact:
         return False, "Contact number cannot be empty."
-    if not contact.isdigit():
-        return False, "Contact number must contain digits only."
-    if len(contact) != 10:
-        return False, "Contact number must be exactly 10 digits."
+    stripped = re.sub(r"[\-\s()]", "", contact)
+    if not re.fullmatch(r"(\+|00)?\d{7,15}", stripped):
+        return False, (
+            "Contact number must be 7-15 digits, with an optional '+' or "
+            "'00' international prefix."
+        )
     return True, ""
 
 

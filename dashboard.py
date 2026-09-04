@@ -23,6 +23,7 @@ from validators import (
     validate_password, validate_subject_name,
     validate_classes_assigned, collect_errors
 )
+import csv_import
 
 st.set_page_config(page_title="School Dashboard", page_icon="🏫", layout="wide")
 
@@ -144,8 +145,8 @@ if st.sidebar.button("Log Out"):
 
 page = st.sidebar.radio(
     "Go to",
-    ["Students", "Teachers", "Subjects", "Timetable", "Exams", "Logins",
-     "Notices", "Almanac", "Suggested Additions", "Learned Phrases"]
+    ["Students", "Teachers", "Departments", "Subjects", "Timetable", "Exams", "Logins",
+     "System Status", "Notices", "Almanac", "Suggested Additions", "Learned Phrases"]
 )
 
 
@@ -156,46 +157,152 @@ if page == "Students":
     st.title("Students")
 
     st.header("Add New Student")
-    with st.form("add_student_form", clear_on_submit=True):
-        name = st.text_input("Student Name")
-        student_class = st.text_input("Class (e.g. 10-A)")
-        roll_no = st.number_input("Roll Number", min_value=1, step=1)
-        dob = st.date_input("Date of Birth")
-        parent_name = st.text_input("Parent's Name")
-        parent_contact = st.text_input("Parent's Contact Number (10 digits)")
-        fees_status = st.selectbox("Fees Status", ["paid", "pending"])
-        attendance_pct = st.number_input("Attendance %", min_value=0.0, max_value=100.0, value=100.0)
+    tab1, tab2 = st.tabs(["Add One Entry", "Bulk Upload (CSV)"])
 
-        submitted = st.form_submit_button("Add Student")
+    with tab1:
+        with st.form("add_student_form", clear_on_submit=True):
+            name = st.text_input("Student Name")
+            student_class = st.text_input("Class (e.g. 10-A)")
+            roll_no = st.number_input("Roll Number", min_value=1, step=1)
+            dob = st.date_input("Date of Birth")
+            parent_name = st.text_input("Parent's Name")
+            parent_contact = st.text_input("Parent's Contact Number (10 digits)")
+            fees_status = st.selectbox("Fees Status", ["paid", "pending"])
+            attendance_pct = st.number_input("Attendance %", min_value=0.0, max_value=100.0, value=100.0)
 
-        if submitted:
-            errors = collect_errors(
-                validate_name(name),
-                validate_class(student_class),
-                validate_contact(parent_contact),
-                validate_attendance(attendance_pct),
-            )
-            # Parent name is optional but if filled, validate it
-            if parent_name.strip():
-                errors += collect_errors(validate_name(parent_name))
+            submitted = st.form_submit_button("Add Student")
 
-            if errors:
-                for e in errors:
-                    st.error(f"⚠️ {e}")
-            else:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    """INSERT INTO students
-                       (name, class, roll_no, dob, parent_name, parent_contact, fees_status, attendance_pct)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (name.strip(), student_class.strip().upper(), roll_no, dob,
-                     parent_name.strip(), parent_contact.strip(), fees_status, attendance_pct)
+            if submitted:
+                errors = collect_errors(
+                    validate_name(name),
+                    validate_class(student_class),
+                    validate_contact(parent_contact),
+                    validate_attendance(attendance_pct),
                 )
-                conn.commit()
-                cursor.close()
-                conn.close()
-                st.success(f"✅ Student '{name.strip()}' added successfully!")
+                # Parent name is optional but if filled, validate it
+                if parent_name.strip():
+                    errors += collect_errors(validate_name(parent_name))
+
+                if errors:
+                    for e in errors:
+                        st.error(f"⚠️ {e}")
+                else:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """INSERT INTO students
+                           (name, class, roll_no, dob, parent_name, parent_contact, fees_status, attendance_pct)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (name.strip(), student_class.strip().upper(), roll_no, dob,
+                         parent_name.strip(), parent_contact.strip(), fees_status, attendance_pct)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.success(f"✅ Student '{name.strip()}' added successfully!")
+
+    with tab2:
+        st.write(
+            "Upload a CSV with student records. Column headers are matched "
+            "flexibly - **Student Name**/**Name**/**Full Name**, "
+            "**Class**/**Grade**(+**Section**), **Roll No**/**Roll Number**, "
+            "**DOB**/**Date of Birth**, **Parent Name**/**Guardian**, "
+            "**Parent Contact**/**Phone**/**Mobile** all work - so a real "
+            "school export doesn't need to be retyped into an exact template."
+        )
+        st.caption(
+            "fees_status and attendance_pct aren't part of a roster export "
+            "(they're tracked over time in this app, not a one-time import "
+            "field) - every imported row gets the default you choose below."
+        )
+
+        template_df = pd.DataFrame({
+            "Student Name": ["Aarav Sharma"], "Class": ["10-A"], "Roll No": [5],
+            "DOB": ["15/06/2010"], "Parent Name": ["Rohan Sharma"],
+            "Parent Contact": ["00966512345678"],
+        })
+        st.download_button(
+            "Download CSV Template", template_df.to_csv(index=False),
+            file_name="students_template.csv", key="student_template_dl"
+        )
+
+        col_a, col_b = st.columns(2)
+        default_fees_status = col_a.selectbox("Default fees status for imported rows", ["pending", "paid"])
+        default_attendance = col_b.number_input(
+            "Default attendance % for imported rows", min_value=0.0, max_value=100.0, value=0.0
+        )
+
+        uploaded_file = st.file_uploader("Upload student CSV", type="csv", key="student_csv_upload")
+
+        if uploaded_file is not None:
+            upload_df = pd.read_csv(uploaded_file)
+
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT class, roll_no FROM students")
+            existing_pairs = {
+                (csv_import.normalize_class_code(str(cls)), int(roll)) for cls, roll in cursor.fetchall()
+            }
+            cursor.close()
+            conn.close()
+
+            results, missing, mapping = csv_import.dry_run_students(
+                upload_df, existing_pairs,
+                fees_status_default=default_fees_status,
+                attendance_pct_default=default_attendance,
+            )
+
+            if missing:
+                st.error(
+                    "Could not find a column for: " + ", ".join(missing) +
+                    ". Detected columns: " + ", ".join(f"'{c}'" for c in upload_df.columns)
+                )
+            else:
+                valid_rows = [r for r in results if r["status"] == "valid"]
+                rejected_rows = [r for r in results if r["status"] == "rejected"]
+
+                st.subheader(f"Dry run: {len(valid_rows)} would be imported, {len(rejected_rows)} rejected")
+
+                if valid_rows:
+                    st.success(f"✅ {len(valid_rows)} row(s) ready to import:")
+                    preview_df = pd.DataFrame([
+                        {"Row": r["row_number"], "Name": r["data"]["name"], "Class": r["data"]["class"],
+                         "Roll No": r["data"]["roll_no"], "DOB": r["data"]["dob"],
+                         "Parent Name": r["data"]["parent_name"], "Parent Contact": r["data"]["parent_contact"]}
+                        for r in valid_rows
+                    ])
+                    st.dataframe(preview_df, hide_index=True)
+
+                if rejected_rows:
+                    st.error(f"⚠️ {len(rejected_rows)} row(s) rejected - nothing here will be imported:")
+                    rejected_df = pd.DataFrame([
+                        {"Row": r["row_number"], "Reasons": "; ".join(r["reasons"])}
+                        for r in rejected_rows
+                    ])
+                    st.dataframe(rejected_df, hide_index=True)
+
+                if valid_rows:
+                    if st.button(f"Confirm Import ({len(valid_rows)} students)", key="confirm_student_import"):
+                        conn = get_connection()
+                        cursor = conn.cursor()
+
+                        def _insert_student(data):
+                            cursor.execute(
+                                """INSERT INTO students
+                                   (name, class, roll_no, dob, parent_name, parent_contact,
+                                    fees_status, attendance_pct)
+                                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                                (data["name"], data["class"], data["roll_no"], data["dob"],
+                                 data["parent_name"], data["parent_contact"],
+                                 data["fees_status"], data["attendance_pct"])
+                            )
+
+                        count = csv_import.apply_students(results, _insert_student)
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        st.success(f"✅ Imported {count} students.")
+                        st.rerun()
 
     st.header("Current Students")
     conn = get_connection()
@@ -292,41 +399,206 @@ elif page == "Teachers":
     st.title("Teachers")
 
     st.header("Add New Teacher")
-    with st.form("add_teacher_form", clear_on_submit=True):
-        t_name = st.text_input("Teacher Name")
-        t_subject = st.text_input("Subject Taught (e.g. Mathematics)")
-        t_contact = st.text_input("Contact Number (10 digits)")
-        t_classes = st.text_input("Classes Assigned (e.g. 10-A, 10-B, 9-C)")
 
-        t_submitted = st.form_submit_button("Add Teacher")
+    # Teachers link to subjects via teacher_subjects now (a teacher can
+    # teach more than one) - subject_id FK's target is the existing
+    # `subjects` table, which has one row per (subject_name, class) pair,
+    # not a clean subject-name lookup. teacher_subjects only cares about
+    # the NAME, so the first (lowest id) row for each distinct name stands
+    # in for it - every consumer of this map only ever reads the name back
+    # via a join, never that representative row's own class value.
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT subject_id, subject_name FROM subjects ORDER BY subject_name, subject_id")
+    _subject_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    name_to_subject_id = {}
+    for _sid, _sname in _subject_rows:
+        name_to_subject_id.setdefault(_sname, _sid)
+    subject_name_options = sorted(name_to_subject_id.keys())
 
-        if t_submitted:
-            errors = collect_errors(
-                validate_name(t_name),
-                validate_subject_name(t_subject),
-                validate_contact(t_contact),
-                validate_classes_assigned(t_classes),
-            )
-            if errors:
-                for e in errors:
-                    st.error(f"⚠️ {e}")
-            else:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    """INSERT INTO teachers (name, subject, contact, classes_assigned)
-                       VALUES (%s, %s, %s, %s)""",
-                    (t_name.strip(), t_subject.strip(), t_contact.strip(), t_classes.strip())
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT department_id, name FROM departments ORDER BY name")
+    _department_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    department_id_by_name = {"(None)": None}
+    department_id_by_name.update({name: did for did, name in _department_rows})
+    department_name_options = list(department_id_by_name.keys())
+
+    t_tab1, t_tab2 = st.tabs(["Add One Entry", "Bulk Upload (CSV)"])
+
+    with t_tab1:
+        with st.form("add_teacher_form", clear_on_submit=True):
+            t_name = st.text_input("Teacher Name")
+            t_subjects = st.multiselect("Subjects Taught", subject_name_options)
+            if not subject_name_options:
+                st.caption("No subjects exist yet - add one on the Subjects page first.")
+            t_department_label = st.selectbox("Department", department_name_options)
+            if not _department_rows:
+                st.caption("No departments exist yet - add one on the Departments page first.")
+            t_contact = st.text_input("Contact Number (10 digits)")
+            t_classes = st.text_input("Classes Assigned (e.g. 10-A, 10-B, 9-C)")
+
+            t_submitted = st.form_submit_button("Add Teacher")
+
+            if t_submitted:
+                errors = collect_errors(
+                    validate_name(t_name),
+                    (bool(t_subjects), "Select at least one subject."),
+                    validate_contact(t_contact),
+                    validate_classes_assigned(t_classes),
                 )
-                conn.commit()
-                cursor.close()
-                conn.close()
-                st.success(f"✅ Teacher '{t_name.strip()}' added successfully!")
+                if errors:
+                    for e in errors:
+                        st.error(f"⚠️ {e}")
+                else:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """INSERT INTO teachers (name, contact, classes_assigned, department_id)
+                           VALUES (%s, %s, %s, %s)""",
+                        (t_name.strip(), t_contact.strip(), t_classes.strip(),
+                         department_id_by_name[t_department_label])
+                    )
+                    new_teacher_id = cursor.lastrowid
+                    for sname in t_subjects:
+                        cursor.execute(
+                            "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (%s, %s)",
+                            (new_teacher_id, name_to_subject_id[sname])
+                        )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.success(f"✅ Teacher '{t_name.strip()}' added successfully!")
+
+    with t_tab2:
+        st.write(
+            "Upload a CSV with teacher records. Column headers are matched "
+            "flexibly - **Teacher Name**/**Name**, **Subject**/**Department**, "
+            "**Contact**/**Phone**, **Classes**/**Assigned Classes** all work. "
+            "A teacher can teach more than one subject - separate them with "
+            "a comma or semicolon in the Subject column (e.g. "
+            "\"Mathematics, Physics\")."
+        )
+        st.caption(
+            "⚠️ Duplicate teacher names are flagged as a warning, not blocked - "
+            "with ~130 real staff, duplicate names are real (this school already "
+            "has two different teachers both named \"Tariq Al-Rashid\"). "
+            "Flagged rows are still imported; the chatbot disambiguates by "
+            "subject at query time if a name match is ambiguous."
+        )
+
+        t_template_df = pd.DataFrame({
+            "Teacher Name": ["Krishna Gupta"], "Subject": ["Mathematics, Physics"],
+            "Contact": ["00966512345678"], "Classes": ["10-A, 10-B"],
+        })
+        st.download_button(
+            "Download CSV Template", t_template_df.to_csv(index=False),
+            file_name="teachers_template.csv", key="teacher_template_dl"
+        )
+
+        t_uploaded_file = st.file_uploader("Upload teacher CSV", type="csv", key="teacher_csv_upload")
+
+        if t_uploaded_file is not None:
+            t_upload_df = pd.read_csv(t_uploaded_file)
+
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM teachers")
+            existing_teacher_names = {row[0].strip().lower() for row in cursor.fetchall()}
+            cursor.close()
+            conn.close()
+
+            t_results, t_missing, t_mapping = csv_import.dry_run_teachers(t_upload_df, existing_teacher_names)
+
+            if t_missing:
+                st.error(
+                    "Could not find a column for: " + ", ".join(t_missing) +
+                    ". Detected columns: " + ", ".join(f"'{c}'" for c in t_upload_df.columns)
+                )
+            else:
+                t_valid_rows = [r for r in t_results if r["status"] in ("valid", "warning")]
+                t_warning_rows = [r for r in t_results if r["status"] == "warning"]
+                t_rejected_rows = [r for r in t_results if r["status"] == "rejected"]
+
+                st.subheader(
+                    f"Dry run: {len(t_valid_rows)} would be imported "
+                    f"({len(t_warning_rows)} with a duplicate-name warning), "
+                    f"{len(t_rejected_rows)} rejected"
+                )
+
+                if t_valid_rows:
+                    st.success(f"✅ {len(t_valid_rows)} row(s) ready to import:")
+                    t_preview_df = pd.DataFrame([
+                        {"Row": r["row_number"], "Name": r["data"]["name"],
+                         "Subjects": ", ".join(r["data"]["subjects"]),
+                         "Contact": r["data"]["contact"], "Classes Assigned": r["data"]["classes_assigned"],
+                         "Warning": "; ".join(r["reasons"]) if r["status"] == "warning" else ""}
+                        for r in t_valid_rows
+                    ])
+                    st.dataframe(t_preview_df, hide_index=True)
+
+                if t_rejected_rows:
+                    st.error(f"⚠️ {len(t_rejected_rows)} row(s) rejected - nothing here will be imported:")
+                    t_rejected_df = pd.DataFrame([
+                        {"Row": r["row_number"], "Reasons": "; ".join(r["reasons"])}
+                        for r in t_rejected_rows
+                    ])
+                    st.dataframe(t_rejected_df, hide_index=True)
+
+                if t_valid_rows:
+                    if st.button(f"Confirm Import ({len(t_valid_rows)} teachers)", key="confirm_teacher_import"):
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        # Local copy, not the page-level map: a CSV subject
+                        # name that isn't in the Subjects page yet gets a
+                        # school-wide entry created for it (class left blank)
+                        # the first time this import batch sees it, rather
+                        # than rejecting an otherwise-valid teacher row.
+                        csv_name_to_subject_id = dict(name_to_subject_id)
+
+                        def _insert_teacher(data):
+                            cursor.execute(
+                                """INSERT INTO teachers (name, contact, classes_assigned)
+                                   VALUES (%s, %s, %s)""",
+                                (data["name"], data["contact"], data["classes_assigned"])
+                            )
+                            new_id = cursor.lastrowid
+                            for sname in data["subjects"]:
+                                if sname not in csv_name_to_subject_id:
+                                    cursor.execute(
+                                        "INSERT INTO subjects (subject_name, class) VALUES (%s, NULL)",
+                                        (sname,)
+                                    )
+                                    csv_name_to_subject_id[sname] = cursor.lastrowid
+                                cursor.execute(
+                                    "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (%s, %s)",
+                                    (new_id, csv_name_to_subject_id[sname])
+                                )
+
+                        t_count = csv_import.apply_teachers(t_results, _insert_teacher)
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        st.success(f"✅ Imported {t_count} teachers.")
+                        st.rerun()
 
     st.header("Current Teachers")
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT teacher_id, name, subject, contact, classes_assigned FROM teachers")
+    cursor.execute("""
+        SELECT te.teacher_id, te.name,
+               COALESCE(GROUP_CONCAT(DISTINCT s.subject_name ORDER BY s.subject_name SEPARATOR ', '), ''),
+               te.contact, te.classes_assigned, COALESCE(d.name, '(None)')
+        FROM teachers te
+        LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id
+        LEFT JOIN subjects s ON ts.subject_id = s.subject_id
+        LEFT JOIN departments d ON te.department_id = d.department_id
+        GROUP BY te.teacher_id, te.name, te.contact, te.classes_assigned, d.name
+    """)
     teacher_rows = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -334,7 +606,7 @@ elif page == "Teachers":
     if teacher_rows:
         teacher_df = pd.DataFrame(
             teacher_rows,
-            columns=["ID", "Name", "Subject", "Contact", "Classes Assigned"]
+            columns=["ID", "Name", "Subjects", "Contact", "Classes Assigned", "Department"]
         )
         st.dataframe(teacher_df, hide_index=True)
     else:
@@ -351,18 +623,37 @@ elif page == "Teachers":
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT name, subject, contact, classes_assigned FROM teachers WHERE teacher_id = %s",
+            "SELECT name, contact, classes_assigned, department_id FROM teachers WHERE teacher_id = %s",
             (selected_teacher_id,)
         )
         current_t = cursor.fetchone()
+        cursor.execute(
+            """SELECT s.subject_name FROM teacher_subjects ts
+               JOIN subjects s ON ts.subject_id = s.subject_id
+               WHERE ts.teacher_id = %s ORDER BY s.subject_name""",
+            (selected_teacher_id,)
+        )
+        current_t_subjects = [r[0] for r in cursor.fetchall()]
         cursor.close()
         conn.close()
 
+        current_department_label = next(
+            (label for label, did in department_id_by_name.items() if did == current_t[3]),
+            "(None)"
+        )
+
         with st.form("edit_teacher_form"):
             te_name = st.text_input("Teacher Name", value=current_t[0])
-            te_subject = st.text_input("Subject Taught", value=current_t[1])
-            te_contact = st.text_input("Contact Number", value=current_t[2])
-            te_classes = st.text_input("Classes Assigned", value=current_t[3])
+            te_subjects = st.multiselect(
+                "Subjects Taught", subject_name_options,
+                default=[s for s in current_t_subjects if s in subject_name_options]
+            )
+            te_department_label = st.selectbox(
+                "Department", department_name_options,
+                index=department_name_options.index(current_department_label)
+            )
+            te_contact = st.text_input("Contact Number", value=current_t[1])
+            te_classes = st.text_input("Classes Assigned", value=current_t[2])
 
             colA, colB = st.columns(2)
             with colA:
@@ -373,7 +664,7 @@ elif page == "Teachers":
             if t_update_clicked:
                 errors = collect_errors(
                     validate_name(te_name),
-                    validate_subject_name(te_subject),
+                    (bool(te_subjects), "Select at least one subject."),
                     validate_contact(te_contact),
                     validate_classes_assigned(te_classes),
                 )
@@ -385,11 +676,20 @@ elif page == "Teachers":
                     cursor = conn.cursor()
                     cursor.execute(
                         """UPDATE teachers
-                           SET name=%s, subject=%s, contact=%s, classes_assigned=%s
+                           SET name=%s, contact=%s, classes_assigned=%s, department_id=%s
                            WHERE teacher_id=%s""",
-                        (te_name.strip(), te_subject.strip(),
-                         te_contact.strip(), te_classes.strip(), selected_teacher_id)
+                        (te_name.strip(), te_contact.strip(), te_classes.strip(),
+                         department_id_by_name[te_department_label], selected_teacher_id)
                     )
+                    # Replace this teacher's subject links wholesale with
+                    # whatever's selected now - simplest correct semantics
+                    # for a "save this form's current state" edit.
+                    cursor.execute("DELETE FROM teacher_subjects WHERE teacher_id=%s", (selected_teacher_id,))
+                    for sname in te_subjects:
+                        cursor.execute(
+                            "INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (%s, %s)",
+                            (selected_teacher_id, name_to_subject_id[sname])
+                        )
                     conn.commit()
                     cursor.close()
                     conn.close()
@@ -399,11 +699,132 @@ elif page == "Teachers":
             if t_delete_clicked:
                 conn = get_connection()
                 cursor = conn.cursor()
+                # teacher_subjects rows must go first - it has a FK on
+                # teacher_id, same FK-safe-order reasoning as everywhere
+                # else in this project (see reset_data.py). A department
+                # that has THIS teacher as its HOD must be cleared too -
+                # departments.hod_teacher_id is also an FK to teachers.
+                cursor.execute("DELETE FROM teacher_subjects WHERE teacher_id=%s", (selected_teacher_id,))
+                cursor.execute("UPDATE departments SET hod_teacher_id=NULL WHERE hod_teacher_id=%s", (selected_teacher_id,))
                 cursor.execute("DELETE FROM teachers WHERE teacher_id=%s", (selected_teacher_id,))
                 conn.commit()
                 cursor.close()
                 conn.close()
                 st.warning(f"'{te_name}' was deleted.")
+                st.rerun()
+
+
+# =========================================================
+# PAGE: DEPARTMENTS
+# Teacher-to-department assignment itself lives on the Teachers page (a
+# "Department" field on the Add/Edit forms) - one place to set it, matching
+# how a teacher's other single-valued fields (contact, classes_assigned)
+# already work there. This page is for the departments themselves: create/
+# edit/delete, and assigning each one's HOD.
+# =========================================================
+elif page == "Departments":
+    st.title("Departments")
+
+    st.header("Add New Department")
+    with st.form("add_department_form", clear_on_submit=True):
+        d_name = st.text_input("Department Name (e.g. Science)")
+        d_submitted = st.form_submit_button("Add Department")
+
+        if d_submitted:
+            if not d_name.strip():
+                st.error("⚠️ Department name cannot be empty.")
+            else:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO departments (name) VALUES (%s)", (d_name.strip(),))
+                conn.commit()
+                cursor.close()
+                conn.close()
+                st.success(f"✅ Department '{d_name.strip()}' added.")
+
+    st.header("Current Departments")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT d.department_id, d.name, hod.name,
+               (SELECT COUNT(*) FROM teachers te WHERE te.department_id = d.department_id)
+        FROM departments d
+        LEFT JOIN teachers hod ON d.hod_teacher_id = hod.teacher_id
+        ORDER BY d.name
+    """)
+    department_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if department_rows:
+        dept_df = pd.DataFrame(department_rows, columns=["ID", "Name", "HOD", "Teachers"])
+        st.dataframe(dept_df, hide_index=True)
+    else:
+        st.info("No departments added yet. Use the form above to add one.")
+
+    st.header("Edit or Delete a Department")
+    if not department_rows:
+        st.info("No departments to edit yet.")
+    else:
+        dept_edit_options = {f"{r[1]} (ID {r[0]})": r[0] for r in department_rows}
+        selected_dept_label = st.selectbox("Select a department", list(dept_edit_options.keys()), key="edit_select_department")
+        selected_dept_id = dept_edit_options[selected_dept_label]
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, hod_teacher_id FROM departments WHERE department_id=%s", (selected_dept_id,))
+        current_d = cursor.fetchone()
+        cursor.execute("SELECT teacher_id, name FROM teachers ORDER BY name")
+        all_teachers = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        hod_options = {"(No HOD assigned)": None}
+        hod_options.update({name: tid for tid, name in all_teachers})
+        hod_labels = list(hod_options.keys())
+        current_hod_label = next((label for label, tid in hod_options.items() if tid == current_d[1]),
+                                  "(No HOD assigned)")
+
+        with st.form("edit_department_form"):
+            de_name = st.text_input("Department Name", value=current_d[0])
+            de_hod_label = st.selectbox(
+                "Head of Department", hod_labels, index=hod_labels.index(current_hod_label)
+            )
+
+            colA, colB = st.columns(2)
+            with colA:
+                d_update_clicked = st.form_submit_button("Save Changes")
+            with colB:
+                d_delete_clicked = st.form_submit_button("Delete Department", type="secondary")
+
+            if d_update_clicked:
+                if not de_name.strip():
+                    st.error("⚠️ Department name cannot be empty.")
+                else:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE departments SET name=%s, hod_teacher_id=%s WHERE department_id=%s",
+                        (de_name.strip(), hod_options[de_hod_label], selected_dept_id)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.success(f"✅ '{de_name.strip()}' updated successfully!")
+                    st.rerun()
+
+            if d_delete_clicked:
+                conn = get_connection()
+                cursor = conn.cursor()
+                # Teachers in this department become unassigned rather than
+                # blocking the delete - department_id is nullable by design
+                # (see setup_database.py).
+                cursor.execute("UPDATE teachers SET department_id=NULL WHERE department_id=%s", (selected_dept_id,))
+                cursor.execute("DELETE FROM departments WHERE department_id=%s", (selected_dept_id,))
+                conn.commit()
+                cursor.close()
+                conn.close()
+                st.warning(f"'{current_d[0]}' was deleted. Its teachers are now unassigned.")
                 st.rerun()
 
 
@@ -881,10 +1302,23 @@ elif page == "Logins":
     st.header("Create Login Credentials")
     st.caption("Give a student or teacher a username + password so they can log into the chatbot.")
 
-    login_role = st.radio("Create login for:", ["Student", "Teacher", "Principal"], key="login_role_choice")
+    login_role = st.radio(
+        "Create login for:",
+        ["Student", "Teacher", "HOD", "Vice Principal", "Assistant Principal", "Principal"],
+        key="login_role_choice"
+    )
+    # DB role values use underscores ("vice_principal") - can't just
+    # .lower() the label the way the original Student/Teacher/Principal-only
+    # version did ("Vice Principal".lower() has a space, not an underscore).
+    ROLE_VALUE_BY_LABEL = {
+        "Student": "student", "Teacher": "teacher", "HOD": "hod",
+        "Vice Principal": "vice_principal", "Assistant Principal": "assistant_principal",
+        "Principal": "principal",
+    }
+    role_value = ROLE_VALUE_BY_LABEL[login_role]
 
-    if login_role == "Principal":
-        st.caption("Principal accounts see school-wide stats, not personal records, so no need to link to a specific person.")
+    if login_role in ("Principal", "Assistant Principal"):
+        st.caption(f"{login_role} accounts see school-wide stats, not personal records, so no need to link to a specific person.")
         with st.form("create_principal_login_form", clear_on_submit=True):
             new_username = st.text_input("Username")
             new_password = st.text_input("Password", type="password")
@@ -905,11 +1339,11 @@ elif page == "Logins":
                     try:
                         cursor.execute(
                             """INSERT INTO users (username, password_hash, role, linked_id)
-                               VALUES (%s, %s, 'principal', 0)""",
-                            (new_username.strip(), hashed)
+                               VALUES (%s, %s, %s, 0)""",
+                            (new_username.strip(), hashed, role_value)
                         )
                         conn.commit()
-                        st.success(f"✅ Principal login created. Username: {new_username.strip()}")
+                        st.success(f"✅ {login_role} login created. Username: {new_username.strip()}")
                     except mysql.connector.IntegrityError:
                         st.error("⚠️ That username is already taken. Please choose another.")
                     finally:
@@ -923,14 +1357,25 @@ elif page == "Logins":
             people = cursor.fetchall()
             people_options = {f"{name} ({cls})": pid for pid, name, cls in people}
         else:
-            cursor.execute("SELECT teacher_id, name, subject FROM teachers")
+            # Teacher, HOD, and Vice Principal all link to a teacher record -
+            # HOD/vice_principal log in AS a teacher (see _build_profile()/
+            # HOD_LIKE_ROLES in app.py), just with extra department-scoped
+            # access on top.
+            cursor.execute("""
+                SELECT te.teacher_id, te.name,
+                       COALESCE(GROUP_CONCAT(DISTINCT s.subject_name ORDER BY s.subject_name SEPARATOR ', '), '')
+                FROM teachers te
+                LEFT JOIN teacher_subjects ts ON te.teacher_id = ts.teacher_id
+                LEFT JOIN subjects s ON ts.subject_id = s.subject_id
+                GROUP BY te.teacher_id, te.name
+            """)
             people = cursor.fetchall()
-            people_options = {f"{name} ({subj})": pid for pid, name, subj in people}
+            people_options = {(f"{name} ({subj})" if subj else name): pid for pid, name, subj in people}
         cursor.close()
         conn.close()
 
         if not people_options:
-            st.info(f"No {login_role.lower()}s added yet.")
+            st.info("No students added yet." if login_role == "Student" else "No teachers added yet.")
         else:
             with st.form("create_login_form", clear_on_submit=True):
                 person_label = st.selectbox("Select person", list(people_options.keys()))
@@ -957,7 +1402,7 @@ elif page == "Logins":
                             cursor.execute(
                                 """INSERT INTO users (username, password_hash, role, linked_id)
                                    VALUES (%s, %s, %s, %s)""",
-                                (new_username.strip(), hashed, login_role.lower(), linked_id)
+                                (new_username.strip(), hashed, role_value, linked_id)
                             )
                             conn.commit()
                             st.success(f"✅ Login created for {person_label}. Username: {new_username.strip()}")
@@ -983,34 +1428,150 @@ elif page == "Logins":
 
 
 # =========================================================
+# PAGE: SYSTEM STATUS
+# Principal-only kill switch's re-enable side (app.py's /api/kill-switch
+# only ever turns it OFF - see that endpoint's docstring). "Visible only to
+# principal and admin roles" is already satisfied by this dashboard's own
+# login gate at the top of this file - a single shared ADMIN_USERNAME/
+# PASSWORD credential, not tied to any individual `users` row, guards
+# every page here, so nobody else can reach this one either. For the same
+# reason, a re-enable's performed_by is logged as NULL (no real user_id
+# exists to attribute it to from here) and shown as "Dashboard Admin"
+# below - a disable, by contrast, always carries a real principal's
+# user_id, logged by app.py from their actual chatbot session.
+# =========================================================
+elif page == "System Status":
+    st.title("System Status")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM system_settings WHERE `key`='chatbot_enabled'")
+    status_row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    enabled = status_row is not None and status_row[0] == "true"
+
+    if enabled:
+        st.success("🟢 YaraBot is ONLINE")
+    else:
+        st.error("🔴 YaraBot is OFFLINE")
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(u.username, 'Dashboard Admin'), sl.timestamp
+            FROM system_logs sl
+            LEFT JOIN users u ON sl.performed_by = u.user_id
+            WHERE sl.action = 'disable'
+            ORDER BY sl.log_id DESC LIMIT 1
+        """)
+        last_disable = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if last_disable:
+            who, when = last_disable
+            st.caption(f"Disabled by **{who}** on {when.strftime('%B %d, %Y at %I:%M %p')}")
+
+        st.header("Re-enable YaraBot")
+
+        # Turning it back on is deliberate, not emergency - a simple
+        # click + confirmation dialog is enough, no 5-second hold like the
+        # chatbot's own disable button.
+        @st.dialog("Confirm")
+        def _confirm_reenable():
+            st.write("Are you sure you want to bring YaraBot back online?")
+            colA, colB = st.columns(2)
+            with colA:
+                if st.button("Yes, bring it online", type="primary", use_container_width=True):
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE system_settings SET value='true' WHERE `key`='chatbot_enabled'")
+                    cursor.execute(
+                        "INSERT INTO system_logs (action, performed_by) VALUES (%s, %s)",
+                        ("enable", None)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.rerun()
+            with colB:
+                if st.button("Cancel", use_container_width=True):
+                    st.rerun()
+
+        if st.button("Re-enable YaraBot"):
+            _confirm_reenable()
+
+    st.header("Recent Toggle History")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT sl.timestamp, sl.action, COALESCE(u.username, 'Dashboard Admin')
+        FROM system_logs sl
+        LEFT JOIN users u ON sl.performed_by = u.user_id
+        ORDER BY sl.log_id DESC LIMIT 10
+    """)
+    history_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if history_rows:
+        history_df = pd.DataFrame(history_rows, columns=["Timestamp", "Action", "By"])
+        st.dataframe(history_df, hide_index=True)
+    else:
+        st.info("No toggle events yet.")
+
+
+# =========================================================
 # PAGE: NOTICES
-# Lets non-technical staff post school-wide announcements that show up
-# through the chatbot's "notices" intent for all three roles (student,
-# teacher, principal) - see handle_notices() in app.py for the chatbot
-# side, and the "notices" entry in nlp_helpers.py's INTENT_DATA.
+# Lets the principal/assistant_principal (this dashboard's own login gate
+# already restricts it to them - see the System Status page's docstring
+# for why there's no finer-grained per-role check possible here) post
+# school-wide announcements that show up through the chatbot's "notices"
+# intent - see handle_notices()/_notice_visible_roles() in app.py for the
+# chatbot side, and the "notices" entry in nlp_helpers.py's INTENT_DATA.
 # =========================================================
 elif page == "Notices":
     st.title("School Notices / Announcements")
-    st.caption("Post announcements that students, teachers, and the principal can see through the chatbot.")
+    st.caption("Post announcements students, teachers, HODs, and/or the principal can see through the chatbot.")
+
+    # Labels shown here map to app.py's _notice_visible_roles() vocabulary -
+    # the 4 access-tier buckets (student/teacher/hod/principal), not the
+    # raw 7-value users.role ENUM. "HODs" also reaches vice_principal and
+    # "Principal" also reaches assistant_principal automatically (same
+    # additive visibility app.py already applies for chat access).
+    NOTICE_TARGET_LABELS = {"Students": "student", "Teachers": "teacher",
+                             "HODs": "hod", "Principal": "principal"}
+    NOTICE_PRIORITY_DISPLAY = {"urgent": "🔴 Urgent", "important": "🟡 Important", "normal": "Normal"}
 
     st.header("Post New Notice")
     with st.form("add_notice_form", clear_on_submit=True):
         notice_title = st.text_input("Title (e.g. 'Sports Day Postponed')")
         notice_body = st.text_area("Message", height=150)
+        notice_target_labels = st.multiselect(
+            "Visible to (leave empty for everyone)",
+            list(NOTICE_TARGET_LABELS.keys())
+        )
+        notice_priority = st.selectbox("Priority", ["normal", "important", "urgent"], index=0)
         notice_submitted = st.form_submit_button("Post Notice")
 
         if notice_submitted:
             if not notice_title.strip() or not notice_body.strip():
                 st.error("⚠️ Please fill in both title and message.")
             else:
+                target_roles = (
+                    ",".join(NOTICE_TARGET_LABELS[label] for label in notice_target_labels)
+                    if notice_target_labels else "all"
+                )
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute(
-                    """INSERT INTO notices (title, body, posted_by, date_posted)
-                       VALUES (%s, %s, %s, %s)""",
+                    """INSERT INTO notices (title, body, posted_by, date_posted, target_roles, priority)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
                     # posted_by=0: dashboard admin isn't a row in `users`, so 0 is
                     # a sentinel for "posted via the admin dashboard".
-                    (notice_title.strip(), notice_body.strip(), 0, datetime.date.today())
+                    (notice_title.strip(), notice_body.strip(), 0, datetime.date.today(),
+                     target_roles, notice_priority)
                 )
                 conn.commit()
                 cursor.close()
@@ -1021,7 +1582,7 @@ elif page == "Notices":
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT notice_id, title, body, date_posted FROM notices "
+        "SELECT notice_id, title, body, date_posted, target_roles, priority FROM notices "
         "ORDER BY date_posted DESC, notice_id DESC"
     )
     notices = cursor.fetchall()
@@ -1031,8 +1592,10 @@ elif page == "Notices":
     if not notices:
         st.info("No notices posted yet.")
     else:
-        for notice_id, title, body, date_posted in notices:
-            with st.expander(f"{title} — {date_posted}"):
+        for notice_id, title, body, date_posted, target_roles, priority in notices:
+            audience = "Everyone" if target_roles in (None, "all") else target_roles.replace(",", ", ")
+            priority_label = NOTICE_PRIORITY_DISPLAY.get(priority, priority or "Normal")
+            with st.expander(f"{title} — {date_posted}  ·  {priority_label}  ·  {audience}"):
                 st.write(body)
                 if st.button("Delete", key=f"del_notice_{notice_id}"):
                     conn = get_connection()

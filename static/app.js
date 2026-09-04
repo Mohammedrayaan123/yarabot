@@ -583,6 +583,25 @@ document.addEventListener("DOMContentLoaded", () => {
     // Login page mascot - the element exists and is visible right away.
     mountBotLottie(document.getElementById("login-lottie"));
 
+    // Independent of login state - GET /api/system-status needs no auth,
+    // and the disabled banner/input/chameleon treatment applies to every
+    // role once on the chat page, so this has to run regardless of
+    // whether restoreSession() below finds a session at all.
+    checkSystemStatus();
+
+    document.getElementById("kill-switch-btn").addEventListener("click", openKillModal);
+    document.getElementById("kill-modal-cancel").addEventListener("click", closeKillModal);
+
+    const killHoldBtn = document.getElementById("kill-hold-btn");
+    killHoldBtn.addEventListener("mousedown", startKillHold);
+    killHoldBtn.addEventListener("mouseup", cancelKillHold);
+    killHoldBtn.addEventListener("mouseleave", cancelKillHold);
+    killHoldBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startKillHold(); });
+    killHoldBtn.addEventListener("touchend", cancelKillHold);
+    killHoldBtn.addEventListener("touchcancel", cancelKillHold);
+
+    document.getElementById("notifications-btn").addEventListener("click", handleNotificationsClick);
+
     restoreSession();
 });
 
@@ -663,6 +682,9 @@ function showChatPage(profile) {
 
     buildIDCard(profile);
     buildQuickActions();
+    initKillSwitch();
+    document.getElementById("notifications-btn").classList.remove("hidden");
+    checkNotificationsCount();
     document.getElementById("chat-input").focus();
 }
 
@@ -733,8 +755,26 @@ function buildIDCard(profile) {
         `;
         document.querySelector("#id-card .text-xs").textContent = "Teacher ID";
 
+    } else if (userRole === "hod" || userRole === "vice_principal") {
+        // hod/vice_principal log in as a teacher record (see app.py's
+        // _build_profile()) - same profile shape as the teacher branch
+        // above, plus a department name to show instead of just "Teacher".
+        const roleLabel = userRole === "hod" ? "HOD" : "Vice Principal";
+        nameEl.textContent = profile.name;
+        subEl.textContent  = profile.department ? `${roleLabel} — ${profile.department}` : roleLabel;
+        statsEl.innerHTML  = `
+            <div class="flex-1 bg-white bg-opacity-20 rounded-xl p-2 text-center">
+                <div class="text-base font-bold">🏢</div>
+                <div class="text-xs opacity-75 uppercase tracking-wide">${roleLabel}</div>
+            </div>
+        `;
+        document.querySelector("#id-card .text-xs").textContent = roleLabel;
+
     } else {
-        nameEl.textContent = "Principal";
+        // principal, assistant_principal - app.py's _build_profile()
+        // already returns the correct label ("Principal"/"Assistant
+        // Principal") as profile.name, so no role check needed here.
+        nameEl.textContent = profile.name;
         subEl.textContent  = "Administration";
         statsEl.innerHTML  = `
             <div class="flex-1 bg-white bg-opacity-20 rounded-xl p-2 text-center">
@@ -742,7 +782,7 @@ function buildIDCard(profile) {
                 <div class="text-xs opacity-75 uppercase tracking-wide">Admin</div>
             </div>
         `;
-        document.querySelector("#id-card .text-xs").textContent = "Principal";
+        document.querySelector("#id-card .text-xs").textContent = profile.name;
     }
 }
 
@@ -766,6 +806,165 @@ function buildQuickActions() {
             ${action.label}
         </button>
     `).join("");
+}
+
+
+// =========================================================
+// PRINCIPAL-ONLY KILL SWITCH
+// chatbotEnabled is checked on every page load (checkSystemStatus(), no
+// auth needed - GET /api/system-status) and updated immediately after a
+// successful kill, so the disabled state never depends on a page reload.
+// The hold-to-disable ring is driven with direct inline style writes, not
+// a CSS class, since an early release has to snap it back INSTANTLY - see
+// the .kill-hold-ring-progress comment in index.html for why that rules
+// out a single class-swap transition.
+// =========================================================
+let chatbotEnabled = true;
+const KILL_RING_CIRCUMFERENCE = 282.74; // 2*pi*45, matches the SVG's r=45
+const KILL_HOLD_MS = 5000;
+let killHoldTimer = null;
+
+async function checkSystemStatus() {
+    try {
+        const res = await fetch("/api/system-status");
+        const data = await res.json();
+        chatbotEnabled = data.enabled !== false;
+    } catch (e) {
+        chatbotEnabled = true; // unreachable - fail open, same default as app.py's _chatbot_enabled()
+    }
+    applySystemStatus();
+}
+
+function applySystemStatus() {
+    const input = document.getElementById("chat-input");
+    const inputBox = document.getElementById("chat-input-box");
+    const banner = document.getElementById("disabled-banner");
+    const chameleon = document.getElementById("sidebar-chameleon");
+    const killBtn = document.getElementById("kill-switch-btn");
+    if (!input) return; // login page - nothing to apply yet
+
+    input.disabled = !chatbotEnabled;
+    inputBox.classList.toggle("chat-disabled", !chatbotEnabled);
+    banner.classList.toggle("hidden", chatbotEnabled);
+    chameleon.classList.toggle("chameleon-disabled", !chatbotEnabled);
+    killBtn.classList.toggle("kill-switch-btn-off", !chatbotEnabled);
+}
+
+// Only the principal (literally - not assistant_principal, see app.py's
+// /api/kill-switch docstring) ever sees this button at all.
+function initKillSwitch() {
+    document.getElementById("kill-switch-btn").classList.toggle("hidden", userRole !== "principal");
+}
+
+
+// =========================================================
+// NOTIFICATIONS BADGE - visual only (see the HTML comment by
+// #notifications-btn and app.py's /api/notices-count/-seen). Not tied to
+// the NLP "notices" intent internally - it's a separate, simpler signal
+// that only needs a count, checked on login and refreshed after the badge
+// is engaged.
+// =========================================================
+async function checkNotificationsCount() {
+    try {
+        const res = await fetch("/api/notices-count");
+        const data = await res.json();
+        const badge = document.getElementById("notifications-badge-count");
+        if (data.count > 0) {
+            badge.textContent = data.count > 9 ? "9+" : String(data.count);
+            badge.classList.remove("hidden");
+        } else {
+            badge.classList.add("hidden");
+        }
+    } catch (e) {
+        // Unreachable - leave whatever badge state was already showing
+        // rather than guessing; the next successful check corrects it.
+    }
+}
+
+// Marks everything seen AND asks the chatbot for the actual notices,
+// reusing the existing quick-action send path (sendQuick()) instead of
+// building a separate notices panel UI just for this button.
+async function handleNotificationsClick() {
+    try {
+        await fetch("/api/notices-seen", { method: "POST" });
+    } catch (e) {
+        // Best-effort - still ask for the notices below even if marking
+        // seen failed, the count will just stay stale until the next check.
+    }
+    checkNotificationsCount();
+    sendQuick("any new announcements");
+}
+
+function openKillModal() {
+    if (!chatbotEnabled) return; // already off - button is inert, but belt and suspenders
+    document.getElementById("kill-modal-warning").classList.remove("hidden");
+    document.getElementById("kill-modal-hold-wrap").classList.remove("hidden");
+    document.getElementById("kill-modal-success").classList.add("hidden");
+    document.getElementById("kill-modal-cancel").classList.remove("hidden");
+    resetKillRing();
+    document.getElementById("kill-modal-backdrop").classList.remove("hidden");
+}
+
+function closeKillModal() {
+    document.getElementById("kill-modal-backdrop").classList.add("hidden");
+    cancelKillHold();
+}
+
+function resetKillRing() {
+    const ring = document.getElementById("kill-hold-ring-progress");
+    ring.style.transition = "none";
+    ring.style.strokeDashoffset = String(KILL_RING_CIRCUMFERENCE);
+    void ring.getBoundingClientRect(); // force reflow so the next transition doesn't merge with this reset
+    ring.style.transition = "";
+}
+
+function startKillHold() {
+    if (killHoldTimer) return; // already holding (e.g. a duplicate mousedown+touchstart)
+    const ring = document.getElementById("kill-hold-ring-progress");
+    resetKillRing();
+    ring.style.transition = `stroke-dashoffset ${KILL_HOLD_MS}ms linear`;
+    ring.style.strokeDashoffset = "0";
+    killHoldTimer = setTimeout(fireKillSwitch, KILL_HOLD_MS);
+}
+
+// Released early: reset the timer AND snap the ring back immediately -
+// "if they release early, the progress resets and nothing happens".
+function cancelKillHold() {
+    if (!killHoldTimer) return;
+    clearTimeout(killHoldTimer);
+    killHoldTimer = null;
+    resetKillRing();
+}
+
+async function fireKillSwitch() {
+    killHoldTimer = null;
+    try {
+        const res = await fetch("/api/kill-switch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "disable" })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showKillSuccess();
+        } else {
+            cancelKillHold();
+        }
+    } catch (e) {
+        cancelKillHold();
+    }
+}
+
+function showKillSuccess() {
+    document.getElementById("kill-modal-warning").classList.add("hidden");
+    document.getElementById("kill-modal-hold-wrap").classList.add("hidden");
+    document.getElementById("kill-modal-cancel").classList.add("hidden");
+    document.getElementById("kill-modal-success").classList.remove("hidden");
+
+    chatbotEnabled = false;
+    applySystemStatus();
+
+    setTimeout(closeKillModal, 2000);
 }
 
 
@@ -813,6 +1012,7 @@ function sendQuick(msg) {
 
 async function sendMessage() {
     const input = document.getElementById("chat-input");
+    if (input.disabled) return; // kill-switched - input already reflects this, nothing to send
     const message = input.value.trim();
     if (!message) return;
 
@@ -855,6 +1055,14 @@ async function sendMessage() {
             const data = await res.json();
             removeTypingBubble();
             appendMessage("bot", data.reply || data.error || "Something went wrong.");
+            // A stale tab that hasn't re-checked /api/system-status yet
+            // can still send one message through before catching up - if
+            // the backend says disabled, lock the UI immediately rather
+            // than waiting for the next page load.
+            if (data.disabled) {
+                chatbotEnabled = false;
+                applySystemStatus();
+            }
         }
 
     } catch (e) {

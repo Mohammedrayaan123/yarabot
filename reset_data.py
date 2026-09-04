@@ -19,8 +19,19 @@ confirm = input(
 if confirm.strip() != "YES":
     print("Cancelled. No data was deleted.")
 else:
-    # FK order: tables that reference others (timetable -> subjects/teachers) go first.
-    tables_in_order = ["timetable", "exams", "notes", "users", "students", "teachers", "subjects", "notices"]
+    # departments and teachers reference each other (departments.hod_teacher_id
+    # -> teachers, teachers.department_id -> departments) - a genuine circular
+    # FK, so a plain per-table DELETE loop can't clear both no matter the
+    # order. Break the cycle first by nulling every hod_teacher_id; teachers
+    # can then be deleted (nothing else references it once teacher_subjects
+    # is gone too), and departments after that (teachers, its only referrer,
+    # is already gone).
+    cursor.execute("UPDATE departments SET hod_teacher_id = NULL")
+
+    # FK order: tables that reference others (timetable -> subjects/teachers,
+    # teacher_subjects -> teachers/subjects) go first.
+    tables_in_order = ["timetable", "exams", "notes", "users", "students",
+                        "teacher_subjects", "teachers", "departments", "subjects", "notices"]
 
     for table in tables_in_order:
         cursor.execute(f"DELETE FROM {table}")

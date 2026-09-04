@@ -3,6 +3,8 @@ import ast
 import difflib
 import re
 
+from validators import GRADE_SECTION_PATTERN, EARLY_YEARS_CLASSES
+
 # ---- Filler / stopwords - words that don't tell us the TOPIC ----
 STOPWORDS = {
     "is", "my", "the", "a", "an", "please", "can", "you", "i",
@@ -219,12 +221,44 @@ INTENT_DATA = {
         "keywords": ["teachers"],
     },
 
+    # ---- HOD expansion (department-scoped versions of the principal
+    # intents above) - "department" is unique vocabulary nowhere else in
+    # this file, so these can't collide with a plain teacher's own
+    # questions; empirically checked against the full HOD bucket (teacher
+    # intents + these three) before shipping - see the app.py role-
+    # hierarchy task this came from.
+    "department_free_teachers": {
+        "phrases": ["teachers in my department are free", "free teachers in my department",
+                    "who is free in my department", "which teachers in my department are free"],
+        "keywords": ["department", "free", "teachers"],
+    },
+    "department_schedule_today": {
+        "phrases": ["my department's schedule today", "department schedule today",
+                    "my department schedule", "department's schedule today"],
+        "keywords": ["department", "schedule"],
+    },
+    "department_teacher_count": {
+        "phrases": ["how many teachers are in my department", "how many teachers in my department",
+                    "department teacher count", "teacher count for my department"],
+        "keywords": ["department", "teachers"],
+    },
+
     # ---- Shared across all three roles ----
+    # "urgent"/"old"/"older" aren't separate intents (a real "notices"
+    # vs. "notices, but urgent-only" vs. "notices, but older" fragmentation
+    # would just be the same underlying query with different filters,
+    # competing with each other for zero benefit) - one intent,
+    # app.py's handle_notices() extracts the urgency/recency filter from
+    # the question text directly, same "optional filter extracted from the
+    # question" pattern already used for exam/timetable's subject/day
+    # filters elsewhere in this file.
     "notices": {
         "phrases": ["latest notices", "any announcements", "school notices",
                     "any updates", "recent announcements", "any notices",
-                    "any notice", "new notices"],
-        "keywords": ["notice", "notices", "announcement", "announcements"],
+                    "any notice", "new notices", "any new announcements",
+                    "old announcements", "older announcements", "old notices",
+                    "older notices", "urgent notices", "any urgent notices"],
+        "keywords": ["notice", "notices", "announcement", "announcements", "urgent"],
     },
     # Deliberately NOT "what subjects" alone - that also matches a teacher
     # asking about their OWN subjects ("what subjects do i teach"), which
@@ -309,18 +343,23 @@ def has_personal_signal(cleaned_question):
     return bool(_PERSONAL_SIGNAL_RE.search(cleaned_question))
 
 
-# Mirrors app.py's extract_class_from_question() pattern - kept as a
-# separate regex here rather than imported, since app.py already imports
-# FROM this module (importing back would be circular). Update both together
-# if the class-code format this school uses ever changes. cleaned_question
-# is already lowercased by clean_question(), so [a-z] (not [A-Za-z]) is
-# enough here.
-_CLASS_CODE_RE = re.compile(r'\b\d{1,2}[\s-]?[a-z]\b')
+# Shares GRADE_SECTION_PATTERN/EARLY_YEARS_CLASSES with app.py's
+# extract_class_from_question() and validators.py's validate_class() - see
+# validators.py for why these three used to drift as independent copies.
+# No circularity importing from validators.py: unlike app.py (which already
+# imports FROM this module), validators.py imports nothing from either file.
+_CLASS_CODE_RE = re.compile(GRADE_SECTION_PATTERN)
+_EARLY_YEARS_RE = re.compile(
+    r'\b(?:' + '|'.join(re.escape(c) for c in EARLY_YEARS_CLASSES) + r')\b',
+    re.IGNORECASE
+)
 
 
 def has_class_code(cleaned_question):
-    """True if a class code (e.g. "10-a"/"10a"/"10 a") is mentioned anywhere in the question."""
-    return bool(_CLASS_CODE_RE.search(cleaned_question))
+    """True if a class code - grade-section ("10-a"/"10a"/"10 a") or an
+    early-years standalone code ("nursery"/"lkg"/"ukg") - is mentioned
+    anywhere in the question."""
+    return bool(_CLASS_CODE_RE.search(cleaned_question) or _EARLY_YEARS_RE.search(cleaned_question))
 
 
 def clean_question(question):
@@ -362,7 +401,10 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
 
     phrase_matched = False
     for phrase in data["phrases"]:
-        if phrase in cleaned_question:
+        # \b-anchored, not a bare substring `in` check - "next period" was
+        # matching inside "next periodical" (word-glued at the tail), same
+        # bug class as extract_teacher_name_from_question()'s "Ann"/"annual".
+        if re.search(r'\b' + re.escape(phrase) + r'\b', cleaned_question):
             score += 3
             phrase_matched = True
 
@@ -381,6 +423,31 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
     return score
 
 
+def rank_intents(question, possible_intents, top_n=3):
+    """
+    Scores `question` against every intent in `possible_intents` and returns
+    the top `top_n` non-zero results, highest first: [(intent, score), ...].
+
+    Ties keep `possible_intents`' own list order (Python's sort() is
+    stable) - this is intentional: app.py's routing needs to see BOTH the
+    winner and the runner-up (to check the margin between them isn't a
+    coin-flip tie), not just a single collapsed "best" intent the way
+    detect_intent_with_score() below returns.
+    """
+    cleaned = clean_question(question)
+    words = tokenize(cleaned)
+    personal_signal = has_personal_signal(cleaned)
+    class_code_present = has_class_code(cleaned)
+
+    scored = [
+        (intent_name, score_intent(cleaned, words, intent_name, personal_signal, class_code_present))
+        for intent_name in possible_intents
+    ]
+    scored = [(name, score) for name, score in scored if score > 0]
+    scored.sort(key=lambda pair: -pair[1])
+    return scored[:top_n]
+
+
 def detect_intent_with_score(question, possible_intents, confidence_threshold=1):
     """
     Same matching as detect_intent(), but also returns the winning score -
@@ -388,22 +455,15 @@ def detect_intent_with_score(question, possible_intents, confidence_threshold=1)
     from a weak, keyword-only match (score 1-2) when deciding whether to
     double-check against the almanac before trusting NLP over Gemini.
 
+    Built on rank_intents() - just keeps its top result, so both stay in
+    sync automatically.
+
     Returns (intent_name_or_None, best_score).
     """
-    cleaned = clean_question(question)
-    words = tokenize(cleaned)
-    personal_signal = has_personal_signal(cleaned)
-    class_code_present = has_class_code(cleaned)
-
-    best_intent = None
-    best_score = 0
-
-    for intent_name in possible_intents:
-        score = score_intent(cleaned, words, intent_name, personal_signal, class_code_present)
-        if score > best_score:
-            best_score = score
-            best_intent = intent_name
-
+    ranked = rank_intents(question, possible_intents, top_n=1)
+    if not ranked:
+        return None, 0
+    best_intent, best_score = ranked[0]
     if best_score >= confidence_threshold:
         return best_intent, best_score
     return None, best_score

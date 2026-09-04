@@ -47,18 +47,7 @@ except OSError:
 
 
 def get_almanac():
-    """
-    Returns the current almanac text, transparently reloading it from disk
-    whenever the file's last-modified time has changed since the last read.
-    This is the single source of truth _score_almanac_sections() (and
-    therefore search_almanac()/almanac_top_score()) reads from - there's no
-    other module-level almanac constant anywhere else to keep in sync.
-
-    If the file has been deleted out from under a running server, keep
-    serving the last good copy rather than suddenly returning '' - a
-    momentary editor save-in-progress or a bad path shouldn't blank out
-    every general-knowledge answer.
-    """
+   
     try:
         current_mtime = os.path.getmtime(ALMANAC_PATH)
     except OSError:
@@ -72,12 +61,7 @@ def get_almanac():
     return _almanac_cache['content']
 
 
-# Grades run I-XII; questions naturally use Arabic numerals ("grade 5")
-# while almanac content uses Roman ("Grade V", or a table column like
-# "I-VII"). Plain word-overlap can't bridge that - "5" shares no
-# characters with "V", and even converting to Roman doesn't help against
-# a RANGE, since "I-VII" never spells out "V" as its own token even though
-# grade 5 is inside it. _section_covers_grade() below handles both forms.
+
 _ROMAN_GRADES = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
 _ROMAN_TO_GRADE = {roman: n + 1 for n, roman in enumerate(_ROMAN_GRADES)}
 
@@ -97,13 +81,7 @@ def _question_grade_number(cleaned_question):
 
 
 def _section_covers_grade(section, grade_n):
-    """
-    True if `section` names grade_n as a Roman numeral - standalone
-    ("Grade V") or as one end of a hyphen/"to"-joined range ("I-VII",
-    "Grades IV to VIII"). Deliberately not treating "&"/"and" as a range
-    joiner - "Class IX & XI" (an admission cutoff-date section) means
-    those two grades specifically, not "IX through XI" inclusive of X.
-    """
+    
     matches = [m for m in re.finditer(r'\b[IVX]+\b', section) if m.group() in _ROMAN_TO_GRADE]
     if not matches:
         return False
@@ -122,28 +100,7 @@ def _section_covers_grade(section, grade_n):
 
 
 def _score_almanac_sections(question):
-    """
-    Score every almanac section against a question by how many question
-    words appear in it. Shared scoring core behind both search_almanac()
-    (the Gemini lane's context lookup) and almanac_top_score() (app.py's
-    NLP-vs-Gemini routing tie-break) - one algorithm, two callers, so a
-    future tweak to the matching rules can't drift between them.
-
-    Returns a list of (score, section) tuples, highest score first. Empty
-    list if the almanac is missing or nothing scores.
-
-    Four fixes found from real queries that failed: strips trailing
-    punctuation ("12th?" still matches "12th"); also checks a
-    whitespace-stripped copy of each section, so "sharktank" matches
-    "Shark Tank"; strips apostrophes from both sides, so "teachers day"
-    matches the almanac's "Teacher's Day" (otherwise they don't share a
-    substring); splits sections on a regex, not a literal '\n\n' - a
-    blank line with a stray trailing space (' \r\n') broke the literal
-    match and collapsed the entire 291-line almanac into one section
-    after a dashboard paste. The dashboard's Almanac editor is a raw
-    textarea, so this has to tolerate whatever whitespace a future paste
-    leaves on its blank lines, not just today's file.
-    """
+    
     almanac = get_almanac()
     if not almanac:
         return []
@@ -161,10 +118,6 @@ def _score_almanac_sections(question):
     question_words = set(cleaned_question.split()) - stopwords
     grade_n = _question_grade_number(cleaned_question)
     if grade_n is not None:
-        # Drop the bare digit ("5") from the generic word-overlap set - as a
-        # substring it matches any price, phone number, or time containing
-        # that digit (e.g. "6:55 AM"), drowning out _section_covers_grade's
-        # more precise signal below with noise from unrelated sections.
         question_words.discard(str(grade_n))
 
     scored = []
@@ -185,23 +138,6 @@ def _score_almanac_sections(question):
 
 
 def search_almanac(question):
-    """
-    Find the most relevant sections of the almanac for this question.
-    Returns the top 3 most relevant sections joined together, or '' if
-    nothing scores.
-
-    Returning '' (not an arbitrary slice of the almanac) matters: it lets
-    ask_gemini() take its existing "no context -> don't call the API" path
-    for genuinely unrelated questions instead of handing Gemini 2000
-    irrelevant characters and spending a quota-limited API call asking it
-    to guess anyway.
-
-    A question naming a specific grade ("grade 5 tuition") always pulls in
-    every section _section_covers_grade() matches for it, even past the
-    top 3 - the fee table's "I-VII"/"VIII-X" columns rarely share enough
-    plain vocabulary with the question to win the word-overlap ranking on
-    their own, so leaving this to score alone was still missing the table.
-    """
     scored = _score_almanac_sections(question)
     top = [section for _, section in scored[:3]]
 
@@ -215,26 +151,86 @@ def search_almanac(question):
 
 
 def almanac_top_score(question):
-    """
-    The single highest section score for this question - a rough measure of
-    "how strongly does real almanac content match this question", used by
-    app.py's use_nlp_lane() as a second signal before trusting a weak NLP
-    intent match. Returns 0 if nothing matches or the almanac is empty.
 
-    This is what makes a NEW event added to school_almanac.txt later
-    (a future "Founders' Day", "Alumni Meet", whatever) automatically
-    protected against being misrouted to NLP, with no code change here -
-    it's scored the same generic way as everything else in the file, not
-    matched against a hand-maintained list of known event names.
-    """
     scored = _score_almanac_sections(question)
     return scored[0][0] if scored else 0
 
 
-# The fallback messages used whenever Gemini can't (or shouldn't) answer.
-# Named constants instead of inline strings so ask_gemini(), the streaming
-# path below, and UNCACHEABLE_ANSWERS all stay in sync automatically - two
-# hand-typed copies of the same string is exactly how they'd quietly drift.
+# =========================================================
+# NOTICES GROUNDING
+# A question ABOUT a specific notice ("what does the uniform change mean?")
+# is answered by Gemini, grounded on that notice's body - not a retrieval
+# of the notice itself (that's handle_notices() in app.py, a separate,
+# deterministic, no-LLM intent for "show me my notices"). Same word-overlap
+# technique as _score_almanac_sections(), applied to notices.title+body
+# instead of the almanac text.
+#
+# visible_roles is a plain set of target_roles tokens (e.g. {"teacher",
+# "hod"}), computed by app.py's _notice_visible_roles() and passed in as
+# data - this module has no import of app.py (would be circular; app.py
+# already imports FROM here) and doesn't need to know anything about the
+# role-hierarchy concepts (hod/vice_principal/assistant_principal) that
+# produced that set.
+# =========================================================
+_NOTICE_STOPWORDS = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
+                     'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
+                     'can', 'you', 'tell', 'give', 'show', 'mean', 'about',
+                     'exactly'}
+
+
+def _score_notices(question, visible_roles):
+    """[(score, title, body), ...] for every notice visible to
+    visible_roles, highest score first. Empty list on a DB error or if
+    nothing scores - same "fail quiet, not loud" reasoning as the rest of
+    this module's DB-touching helpers (log_unanswered_question() etc.):
+    a notices lookup hiccup should degrade to "no extra grounding found",
+    never break the almanac-only answer path that already works."""
+    if not visible_roles:
+        return []
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        conditions = ["target_roles='all'"] + ["FIND_IN_SET(%s, target_roles)"] * len(visible_roles)
+        cursor.execute(
+            f"SELECT title, body FROM notices WHERE ({' OR '.join(conditions)})",
+            tuple(visible_roles)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f'[NOTICES CONTEXT ERROR] {e}')
+        return []
+
+    cleaned_question = question.lower()
+    for ch in '?!.,':
+        cleaned_question = cleaned_question.replace(ch, '')
+    question_words = set(cleaned_question.split()) - _NOTICE_STOPWORDS
+
+    scored = []
+    for title, body in rows:
+        text = f"{title} {body}".lower()
+        score = sum(1 for word in question_words if word in text)
+        if score > 0:
+            scored.append((score, title, body))
+
+    scored.sort(reverse=True, key=lambda t: t[0])
+    return scored
+
+
+def search_notice_context(question, visible_roles):
+    """The single best-matching notice's body as grounding context, or ''
+    if nothing scores - deliberately just ONE notice, not the almanac's
+    top-3: "inject THAT notice's body", not a dump of everything posted."""
+    scored = _score_notices(question, visible_roles)
+    if not scored:
+        return ''
+    _, title, body = scored[0]
+    return f"Recent notice — {title}: {body}"
+
+
+
 NO_CONTEXT_MESSAGE = (
     "I don't have general school information available yet. "
     "Please contact the school office directly."
@@ -243,12 +239,7 @@ API_ERROR_MESSAGE = (
     "I'm having trouble connecting to my knowledge base right now. "
     "Please contact the school office for this information."
 )
-# NO_CONTEXT_MESSAGE only fires on the short-circuit "context is completely
-# empty" path, before Gemini is ever called. A live call with SOME weak,
-# irrelevant context (e.g. "does the school have a swimming pool" scores >0
-# just off the word "school") instead follows this instructed refusal
-# wording - the far more common real "no info" case. Checked alongside
-# NO_CONTEXT_MESSAGE wherever "did Gemini draw a blank" matters.
+
 GEMINI_DECLINED_PHRASE = "I don't have that information — please contact the school office directly."
 
 GEMINI_MODEL = 'gemini-3.5-flash-lite'
@@ -268,7 +259,6 @@ FORCE_GROQ = os.getenv('FORCE_GROQ', 'false').strip().lower() == 'true'
 
 
 def _build_prompt(question, context):
-    """Shared prompt template for the Gemini and Groq calls (blocking and streaming)."""
     return f"""You are a helpful assistant for Yara International School in Riyadh, Saudi Arabia.
 Answer the question using ONLY the school information provided below.
 If the answer is not clearly in the provided information, say exactly:
@@ -706,11 +696,24 @@ def cache_answer(normalized_question, answer):
     print(f'[CACHE SIZE] {len(_cache)} entries')
 
 
-def gemini_answer(question):
+def gemini_answer(question, visible_roles=()):
     """
-    Main entry point — search almanac then ask Gemini, falling back to Groq
-    automatically if Gemini is specifically rate-limited (not for other
-    kinds of failures, which still show the normal error message).
+    Main entry point — search almanac (+ notices, if a specific one is
+    matched) then ask Gemini, falling back to Groq automatically if Gemini
+    is specifically rate-limited (not for other kinds of failures, which
+    still show the normal error message).
+
+    visible_roles: target_roles tokens the asker's role can see notices
+    for (app.py's _notice_visible_roles()) - default () means "don't
+    search notices at all", so a caller that doesn't pass it gets the
+    exact old almanac-only behavior.
+
+    A matched notice bypasses the cache entirely, both read and write -
+    notices are role- and time-sensitive (posted/edited/deleted at any
+    time) in a way the mostly-static almanac isn't, and this cache has no
+    concept of "which role asked" in its key at all. Re-searching notices
+    on every call costs one extra query only for questions that don't
+    already hit the cache on almanac content alone.
 
     If FORCE_GROQ is on, Gemini is skipped entirely and Groq answers every
     time - a separate debug branch from the rate-limit fallback above, not
@@ -718,11 +721,16 @@ def gemini_answer(question):
     """
     normalized = normalize_question(question)
 
-    cached = find_cached_answer(normalized)
-    if cached:
-        return cached
+    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
+    used_notice = bool(notice_context)
 
-    context = search_almanac(question)
+    if not used_notice:
+        cached = find_cached_answer(normalized)
+        if cached:
+            return cached
+
+    almanac_context = search_almanac(question)
+    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -756,14 +764,19 @@ def gemini_answer(question):
             log_unanswered_question(question)
         return answer
 
-    # Store in cache for next time - whichever provider actually answered.
-    cache_answer(normalized, answer)
+    if used_notice:
+        print(f'[CACHE SKIPPED] Notice-grounded answer not cached (role/time-sensitive): {normalized}')
+    else:
+        # Store in cache for next time - whichever provider actually answered.
+        cache_answer(normalized, answer)
     return answer
 
 
-def gemini_answer_stream(question):
+def gemini_answer_stream(question, visible_roles=()):
     """
-    Streaming twin of gemini_answer(), used by app.py's /api/chat route.
+    Streaming twin of gemini_answer(), used by app.py's /api/chat route -
+    see that function's docstring for the notices-grounding/cache-bypass
+    reasoning (visible_roles has the exact same meaning and default here).
 
     Cache hit and no-almanac-match both yield a single chunk with no API
     call, so app.js always sees a stream of 1+ chunks regardless of whether
@@ -778,12 +791,17 @@ def gemini_answer_stream(question):
     """
     normalized = normalize_question(question)
 
-    cached = find_cached_answer(normalized)
-    if cached:
-        yield cached
-        return
+    notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
+    used_notice = bool(notice_context)
 
-    context = search_almanac(question)
+    if not used_notice:
+        cached = find_cached_answer(normalized)
+        if cached:
+            yield cached
+            return
+
+    almanac_context = search_almanac(question)
+    context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
         print(f'[FORCE_GROQ ACTIVE] Skipping Gemini, using Groq directly: {question}')
@@ -828,4 +846,7 @@ def gemini_answer_stream(question):
     if full_answer == NO_CONTEXT_MESSAGE or full_answer == GEMINI_DECLINED_PHRASE:
         log_unanswered_question(question)
     if full_answer and full_answer not in UNCACHEABLE_ANSWERS:
-        cache_answer(normalized, full_answer)
+        if used_notice:
+            print(f'[CACHE SKIPPED] Notice-grounded answer not cached (role/time-sensitive): {normalized}')
+        else:
+            cache_answer(normalized, full_answer)
