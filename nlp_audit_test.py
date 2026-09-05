@@ -65,7 +65,16 @@ def fake_query(sql, params=None, fetch=False, many=False):
     if "left join teacher_subjects" in normalized:
         return [(1, "Mr Ann", "Mathematics"), (2, "Ms Smith", "Science")]
     if "select distinct subject_name from subjects" in normalized:
-        return [("Mathematics",), ("Science",), ("Computer Science",)]
+        # Full real subject list (see `SELECT DISTINCT subject_name FROM
+        # subjects` against the live DB) - a stale, partial list here
+        # (missing e.g. Biology) previously caused a false-positive "tie"
+        # in the 58-case tie-break audit: _apply_subject_scoring_
+        # adjustment() only recognizes a subject named in the question
+        # when _known_subject_names() (this same query) actually contains
+        # it, so "how many faculty teach biology" scored as ambiguous
+        # HERE while resolving outright against the real DB.
+        return [("Biology",), ("Chemistry",), ("Computer Science",), ("English",),
+                ("Hindi",), ("Mathematics",), ("Physics",), ("Science",), ("Social Studies",)]
     if "select distinct subject from teachers" in normalized:
         return [("Mathematics",), ("Science",)]
     if "group by class" in normalized:
