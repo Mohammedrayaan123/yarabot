@@ -194,6 +194,7 @@ print(f"{hod_count} HODs assigned.")
 print("Adding timetable entries...")
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 count = 0
+teachers_by_class = {cls: set() for cls in CLASSES}  # for step 6b below
 
 for cls in CLASSES:
     grade = int(cls.split("-")[0])
@@ -207,6 +208,7 @@ for cls in CLASSES:
             if not subject_id or not candidates:
                 continue
             teacher_id = random.choice(candidates)
+            teachers_by_class[cls].add(teacher_id)
 
             cursor.execute(
                 """INSERT INTO timetable (class, day, period_no, subject_id, teacher_id)
@@ -217,6 +219,26 @@ for cls in CLASSES:
 
 conn.commit()
 print(f"{count} timetable entries added.")
+
+# ---- 6b. Designate one "class teacher" (homeroom teacher) per section -
+# picked from teachers who actually teach that class already, same real-
+# world logic as a school assigning homeroom duty to one of a class's own
+# subject teachers rather than an unrelated staff member ----
+print("Assigning class teachers...")
+class_teacher_count = 0
+for cls in CLASSES:
+    candidates = list(teachers_by_class[cls])
+    if not candidates:
+        continue
+    class_teacher_id = random.choice(candidates)
+    cursor.execute(
+        "INSERT INTO class_teachers (class, teacher_id) VALUES (%s, %s)",
+        (cls, class_teacher_id)
+    )
+    class_teacher_count += 1
+
+conn.commit()
+print(f"{class_teacher_count} class teachers assigned.")
 
 # ---- 7. Generate a few upcoming exams per class ----
 print("Adding exams...")

@@ -145,8 +145,8 @@ if st.sidebar.button("Log Out"):
 
 page = st.sidebar.radio(
     "Go to",
-    ["Students", "Teachers", "Departments", "Subjects", "Timetable", "Exams", "Logins",
-     "System Status", "Notices", "Almanac", "Suggested Additions", "Learned Phrases"]
+    ["Students", "Teachers", "Departments", "Class Teachers", "Subjects", "Timetable", "Exams",
+     "Logins", "System Status", "Notices", "Almanac", "Suggested Additions", "Learned Phrases"]
 )
 
 
@@ -826,6 +826,96 @@ elif page == "Departments":
                 conn.close()
                 st.warning(f"'{current_d[0]}' was deleted. Its teachers are now unassigned.")
                 st.rerun()
+
+
+# =========================================================
+# PAGE: CLASS TEACHERS
+# =========================================================
+elif page == "Class Teachers":
+    st.title("Class Teachers")
+    st.write(
+        "Assign one class teacher (homeroom teacher) per class section - "
+        "answers a student's 'who is my class teacher'."
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    # There's no standalone "classes" table (see setup_database.py) - class
+    # codes are free text scattered across several tables, so the list of
+    # classes that actually exist is derived from wherever one might be
+    # recorded, same as how the chatbot itself has no single source of truth
+    # for "every class" either.
+    cursor.execute("""
+        SELECT DISTINCT class FROM students
+        UNION
+        SELECT DISTINCT class FROM timetable
+        ORDER BY class
+    """)
+    all_classes = [row[0] for row in cursor.fetchall()]
+
+    cursor.execute("SELECT teacher_id, name FROM teachers ORDER BY name")
+    all_teachers = cursor.fetchall()
+
+    cursor.execute("SELECT class, teacher_id FROM class_teachers")
+    current_assignments = dict(cursor.fetchall())
+    cursor.close()
+    conn.close()
+
+    if not all_classes:
+        st.info("No classes found yet - add students or a timetable first.")
+    else:
+        teacher_options = {"(No class teacher assigned)": None}
+        teacher_options.update({name: tid for tid, name in all_teachers})
+        teacher_labels = list(teacher_options.keys())
+
+        selected_class = st.selectbox("Select a class", all_classes, key="class_teacher_select_class")
+        current_tid = current_assignments.get(selected_class)
+        current_label = next(
+            (label for label, tid in teacher_options.items() if tid == current_tid),
+            "(No class teacher assigned)"
+        )
+
+        with st.form("class_teacher_form"):
+            ct_label = st.selectbox(
+                "Class Teacher", teacher_labels, index=teacher_labels.index(current_label)
+            )
+            ct_submitted = st.form_submit_button("Save")
+
+            if ct_submitted:
+                conn = get_connection()
+                cursor = conn.cursor()
+                new_tid = teacher_options[ct_label]
+                if new_tid is None:
+                    cursor.execute("DELETE FROM class_teachers WHERE class=%s", (selected_class,))
+                else:
+                    cursor.execute(
+                        """INSERT INTO class_teachers (class, teacher_id) VALUES (%s, %s)
+                           ON DUPLICATE KEY UPDATE teacher_id=%s""",
+                        (selected_class, new_tid, new_tid)
+                    )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                st.success(f"✅ Class teacher for '{selected_class}' updated.")
+                st.rerun()
+
+    st.header("Current Class Teacher Assignments")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT ct.class, te.name
+        FROM class_teachers ct
+        JOIN teachers te ON ct.teacher_id = te.teacher_id
+        ORDER BY ct.class
+    """)
+    class_teacher_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if class_teacher_rows:
+        st.dataframe(pd.DataFrame(class_teacher_rows, columns=["Class", "Class Teacher"]), hide_index=True)
+    else:
+        st.info("No class teachers assigned yet.")
 
 
 # =========================================================

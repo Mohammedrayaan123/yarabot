@@ -84,8 +84,8 @@ HANDLER_NAMES = [
     "handle_notices", "handle_subjects_offered", "handle_teacher_location",
     "handle_classroom_occupant", "handle_free_teachers", "handle_teacher_schedule_lookup",
     "handle_class_timetable_lookup", "handle_school_wide_subject_teacher",
-    "handle_class_teacher_lookup", "handle_low_attendance_count", "handle_pending_fees_count",
-    "handle_teacher_count_by_subject", "handle_department_free_teachers",
+    "handle_class_teacher_lookup", "handle_class_teacher", "handle_low_attendance_count",
+    "handle_pending_fees_count", "handle_teacher_count_by_subject", "handle_department_free_teachers",
     "handle_department_schedule_today", "handle_department_teacher_count",
 ]
 
@@ -111,6 +111,7 @@ HANDLER_TO_INTENT = {
     "handle_class_timetable_lookup": "class_timetable_lookup",
     "handle_school_wide_subject_teacher": "school_wide_subject_teacher",
     "handle_class_teacher_lookup": "class_teacher_lookup",
+    "handle_class_teacher": "class_teacher",
     "handle_low_attendance_count": "low_attendance_count",
     "handle_pending_fees_count": "pending_fees_count",
     "handle_teacher_count_by_subject": "teacher_count_by_subject",
@@ -232,14 +233,21 @@ BREAKING_INPUTS = [
     ("redirect:schedule-for-class-code", "principal", "Schedule for 10A"),
     ("redirect:teacher-for-class-code", "principal", "Who teaches 10A?"),
     ("redirect:subject-in-curriculum", "student", "What subjects does the school offer math?"),
-    # my_class's "my class" phrase collides with class_teacher_lookup's own
-    # "class teacher" phrase inside these - class_teacher_lookup isn't a
-    # student candidate intent at all (principal-only), so answer_student()
-    # redirects my_class -> class_teacher_lookup post-detection instead.
-    ("redirect:my-class-teacher-who-is", "student", "who is my class teacher"),
-    ("redirect:my-class-teacher-name", "student", "my class teacher name"),
-    ("redirect:my-class-teacher-tell-me", "student", "tell me my class teacher"),
-    ("class-teacher-lookup-with-code", "principal", "class teacher for 10-B"),
+    # class_teacher (the one homeroom teacher) vs. my_class - "my class
+    # teacher" phrase-matches BOTH class_teacher's own phrases and my_class's
+    # shorter "my class" substring; class_teacher's longer/duplicate phrase
+    # matches must win by a real margin, not just tie and trigger an
+    # ambiguity clarification. No redirect involved - class_teacher is a
+    # real scored student candidate now, unlike the old class_teacher_lookup
+    # (still principal-only, kept separate on purpose - see nlp_helpers.py).
+    ("class-teacher-vs-my-class:who-is", "student", "who is my class teacher"),
+    ("class-teacher-vs-my-class:name", "student", "my class teacher name"),
+    ("class-teacher-vs-my-class:tell-me", "student", "tell me my class teacher"),
+    # class_teacher (singular, homeroom) vs. class_teacher_lookup (plural,
+    # every subject teacher) for the same principal-style class-code
+    # question - "class teacher" was deliberately removed from
+    # class_teacher_lookup's phrases so this can't tie.
+    ("class-teacher-vs-lookup:with-code", "principal", "class teacher for 10-B"),
     # HOD department-scoped intents, empirically checked for collisions
     # against the full hod bucket (teacher intents + these) before shipping.
     ("hod:department-free-teachers", "hod", "which teachers in my department are free"),

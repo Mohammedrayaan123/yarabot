@@ -195,16 +195,41 @@ INTENT_DATA = {
         "keywords": ["teaches"],
     },
     # All subject-teacher pairs for a class - distinct from classroom_occupant
-    # (who's in THIS class right now) and school_wide_subject_teacher (which
-    # teacher teaches a SUBJECT school-wide). Shares "who teaches" with
+    # (who's in THIS class right now), school_wide_subject_teacher (which
+    # teacher teaches a SUBJECT school-wide), and class_teacher (the ONE
+    # designated homeroom teacher, below). Shares "who teaches" with
     # school_wide_subject_teacher with nothing to distinguish a class code
     # from a subject name by substring alone - same redirect pattern as
-    # class_timetable_lookup above.
+    # class_timetable_lookup above. Deliberately does NOT include "class
+    # teacher" (singular) - that phrase means the ONE homeroom teacher, not
+    # this intent's full subject roster; see class_teacher's own phrases.
     "class_teacher_lookup": {
         "phrases": ["who teaches class", "teacher for class", "teachers for class",
-                    "who is the teacher for class", "class teachers", "class teacher",
+                    "who is the teacher for class", "class teachers",
                     "teachers assigned to class"],
         "keywords": ["teacher", "teachers", "teach", "teaches", "class", "classes"],
+        "class_code_bypass": True,
+    },
+    # The single designated homeroom "class teacher" for a class - the
+    # standard term at Indian-curriculum schools like Yara. Distinct from
+    # class_teacher_lookup above (ALL subject teachers for a class). The
+    # dividing line is genuinely just singular "class teacher" here vs.
+    # plural "class teachers"/"who teaches class" there - "class teacher"
+    # was deliberately removed from class_teacher_lookup's own phrase list
+    # so the two can never both phrase-match the same question.
+    "class_teacher": {
+        # Bare "class teacher" is listed alongside the longer phrases it's
+        # already a substring of (not redundant - score_intent() awards +3
+        # per DISTINCT phrase match, so a longer phrase also matching this
+        # one stacks an extra +3). Needed to keep a safe margin over
+        # subject_teacher ("teacher for" is itself a substring of "class
+        # teacher for") and over my_class's bare "my class" - confirmed via
+        # nlp_audit_test.py's auto-generated phrase-substring cases, which
+        # caught both as real (if narrow) ties without this.
+        "phrases": ["class teacher", "my class teacher", "who is my class teacher",
+                    "class teacher name", "class teacher for", "who is the class teacher",
+                    "class teacher of", "tell me my class teacher"],
+        "keywords": ["teacher", "class"],
         "class_code_bypass": True,
     },
     "low_attendance_count": {

@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS subjects (
 )
 """
 
+# One homeroom "class teacher" per section - the single teacher a class
+# reports to, distinct from teacher_subjects (which subjects a teacher
+# teaches) and timetable (which teacher covers which period). `class` as
+# the primary key enforces "at most one class teacher per section" in the
+# schema itself, no surrogate id needed - same natural-key style as
+# system_settings below.
+tables["class_teachers"] = """
+CREATE TABLE IF NOT EXISTS class_teachers (
+    class VARCHAR(10) PRIMARY KEY,
+    teacher_id INT,
+    FOREIGN KEY (teacher_id) REFERENCES teachers(teacher_id)
+)
+"""
+
 tables["timetable"] = """
 CREATE TABLE IF NOT EXISTS timetable (
     entry_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -206,10 +220,10 @@ CREATE TABLE IF NOT EXISTS system_logs (
 """
 
 # FK order: departments must exist before teachers (teachers.department_id).
-# timetable/teacher_subjects need subjects/teachers, so those go after both.
-# system_logs needs users to already exist (performed_by FK).
-creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "students",
-                   "timetable", "exams", "notes", "notices",
+# timetable/teacher_subjects/class_teachers need subjects/teachers, so those
+# go after both. system_logs needs users to already exist (performed_by FK).
+creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "class_teachers",
+                   "students", "timetable", "exams", "notes", "notices",
                    "unanswered_questions", "learned_phrases", "users",
                    "system_settings", "system_logs"]
 

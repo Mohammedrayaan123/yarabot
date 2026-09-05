@@ -224,14 +224,14 @@ HOD_DEPARTMENT_INTENTS = ["department_free_teachers", "department_schedule_today
 
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
-                "roll_number", "my_class", "next_period", "subject_teacher",
-                "notices", "subjects_offered"],
+                "roll_number", "my_class", "class_teacher", "next_period",
+                "subject_teacher", "notices", "subjects_offered"],
     "teacher": TEACHER_INTENTS,
     "hod": TEACHER_INTENTS + HOD_DEPARTMENT_INTENTS,
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
                   "class_wise_count", "teacher_location", "classroom_occupant",
                   "free_teachers", "teacher_schedule_lookup", "class_timetable_lookup",
-                  "school_wide_subject_teacher", "class_teacher_lookup",
+                  "school_wide_subject_teacher", "class_teacher_lookup", "class_teacher",
                   "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"],
 }
 
@@ -285,6 +285,7 @@ INTENT_DESCRIPTIONS = {
     "class_timetable_lookup": "a class's timetable",
     "school_wide_subject_teacher": "who teaches a subject school-wide",
     "class_teacher_lookup": "a class's subject-teacher list",
+    "class_teacher": "a class's designated class teacher",
     "low_attendance_count": "students below the attendance threshold",
     "pending_fees_count": "students with pending fees",
     "teacher_count_by_subject": "how many teachers teach a subject",
@@ -876,6 +877,16 @@ CLARIFICATION_CONFIG = {
         "role": "principal",
         "prompt": "Which class would you like to check? Please include the class (e.g. 10-A).",
     },
+    # Distinctly-worded prompt from class_teacher_lookup's above - required
+    # per this dict's own reverse-lookup rule (see _CLARIFICATION_BY_PROMPT's
+    # comment below), and it's the same principal role, so a shared prompt
+    # would collide. Student-side "who is my class teacher" never needs
+    # this - the student's own class is always available as a default, see
+    # answer_student()'s class_teacher branch.
+    "class_teacher": {
+        "role": "principal",
+        "prompt": "Which class would you like the class teacher for? Please include the class (e.g. 10-A).",
+    },
     "teacher_schedule_lookup": {
         "role": "principal",
         "prompt": "Which teacher's schedule would you like to see?",
@@ -934,6 +945,8 @@ def _resume_clarification_reply(intent, question, linked_id, original_message):
             return handle_school_wide_subject_teacher(q)
         if intent == "class_teacher_lookup":
             return handle_class_teacher_lookup(q)
+        if intent == "class_teacher":
+            return handle_class_teacher(q)
         if intent == "teacher_schedule_lookup":
             return handle_teacher_schedule_lookup(q)
         if intent == "teacher_count_by_subject":
@@ -2121,17 +2134,14 @@ def handle_school_wide_subject_teacher(question):
     return f"No teacher found for {subject}" + (f" in {cls}." if cls else ".")
 
 
-def handle_class_teacher_lookup(question, default_class=None):
+def handle_class_teacher_lookup(question):
     """Every subject-teacher pair for a class - "Class 10-A: Mathematics
     — Mr. X, Science — Ms. Y". Distinct from handle_classroom_occupant()
-    (who's in THIS class right now) and handle_school_wide_subject_teacher()
-    (which teacher teaches a SUBJECT school-wide, not a class's roster).
-
-    default_class: a student's own class (see answer_student()'s my_class ->
-    class_teacher_lookup redirect) - "who is my class teacher" names no
-    class code for extract_class_from_question() to find.
-    """
-    cls = extract_class_from_question(question) or default_class
+    (who's in THIS class right now), handle_school_wide_subject_teacher()
+    (which teacher teaches a SUBJECT school-wide, not a class's roster), and
+    handle_class_teacher() (the ONE designated homeroom teacher, not the
+    full subject roster this returns)."""
+    cls = extract_class_from_question(question)
     if not cls:
         return "Which class would you like to check? Please include the class (e.g. 10-A)."
 
@@ -2149,6 +2159,32 @@ def handle_class_teacher_lookup(question, default_class=None):
 
     pairs = ", ".join(f"{subj} — {teacher}" for subj, teacher in results)
     return f"**Class {cls}**: {pairs}"
+
+
+def handle_class_teacher(question, default_class=None):
+    """The single designated homeroom "class teacher" for a class - the
+    standard term at Indian-curriculum schools like Yara for the one
+    teacher a class reports to, distinct from handle_class_teacher_lookup()
+    (every SUBJECT teacher for a class).
+
+    default_class: a student's own class, used when the question itself
+    names no class code - "who is my class teacher" has nothing for
+    extract_class_from_question() to find.
+    """
+    cls = extract_class_from_question(question) or default_class
+    if not cls:
+        return "Which class would you like the class teacher for? Please include the class (e.g. 10-A)."
+
+    result = query("""
+        SELECT te.name
+        FROM class_teachers ct
+        JOIN teachers te ON ct.teacher_id = te.teacher_id
+        WHERE ct.class = %s
+    """, (cls,), fetch=True)
+
+    if not result:
+        return f"No class teacher has been assigned for **{cls}** yet."
+    return f"**{cls}**'s class teacher is **{result[0]}**."
 
 
 def handle_low_attendance_count():
@@ -2219,8 +2255,8 @@ def answer_student(question, student_id, forced_intent=None):
     intent = forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
-         "identity", "roll_number", "my_class", "next_period", "subject_teacher",
-         "notices", "subjects_offered"]
+         "identity", "roll_number", "my_class", "class_teacher", "next_period",
+         "subject_teacher", "notices", "subjects_offered"]
     )
 
     # subject_teacher's "who teaches me"/"teacher for" phrases are about a
@@ -2233,15 +2269,6 @@ def answer_student(question, student_id, forced_intent=None):
     if forced_intent is None and intent == "subjects_offered" \
             and extract_subject_from_question(question, _known_subject_names()):
         intent = "subject_teacher"
-
-    # my_class's "my class" phrase also matches inside "who is my class
-    # teacher" - class_teacher_lookup isn't in this role's own candidate
-    # list (it's principal-only), so it never competes in scoring; a real
-    # "teacher" word alongside the class reference is a stronger signal of
-    # what's actually being asked. Same redirect-after-detection pattern as
-    # the subjects_offered check above, not a nlp_helpers.py scoring change.
-    if forced_intent is None and intent == "my_class" and re.search(r'\bteacher\b', question.lower()):
-        intent = "class_teacher_lookup"
 
     if intent == "greeting":
         return "Hi, I'm Nova! Ask me about your attendance, exams, timetable, or fees. 😊"
@@ -2256,6 +2283,7 @@ def answer_student(question, student_id, forced_intent=None):
                 "🙋 **My details** — *'who am i'*, *'my roll number'*, *'what class am i in'*\n"
                 "⏭ **Next period** — *'what's my next period'*\n"
                 "👩‍🏫 **Subject teacher** — *'who teaches me math'*\n"
+                "🏫 **Class teacher** — *'who is my class teacher'*\n"
                 "📢 **Notices** — *'any announcements'*")
 
     if intent == "attendance":
@@ -2295,12 +2323,12 @@ def answer_student(question, student_id, forced_intent=None):
     elif intent == "my_class":
         return handle_my_class(student_id)
 
-    elif intent == "class_teacher_lookup":
+    elif intent == "class_teacher":
         default_class = None
         if not extract_class_from_question(question):
             result = query("SELECT class FROM students WHERE student_id=%s", (student_id,), fetch=True)
             default_class = result[0] if result else None
-        return handle_class_teacher_lookup(question, default_class=default_class)
+        return handle_class_teacher(question, default_class=default_class)
 
     elif intent == "next_period":
         return handle_next_period(student_id)
@@ -2439,7 +2467,7 @@ def answer_principal(question, forced_intent=None):
             "teacher_count_by_subject", "total_students", "total_teachers", "class_wise_count",
             "teacher_location", "classroom_occupant", "free_teachers",
             "teacher_schedule_lookup", "class_timetable_lookup",
-            "school_wide_subject_teacher", "class_teacher_lookup",
+            "school_wide_subject_teacher", "class_teacher_lookup", "class_teacher",
             "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"
         ])
         principal_ranked = _apply_subject_scoring_adjustment(principal_ranked, question)
@@ -2495,6 +2523,7 @@ def answer_principal(question, forced_intent=None):
                 "📅 **A class's timetable** — *'timetable for class 10-A'*\n"
                 "👩‍🏫 **Subject teachers** — *'who teaches math'*\n"
                 "🧑‍🏫 **A class's teachers** — *'who teaches class 10-A'*\n"
+                "🏫 **A class's class teacher** — *'class teacher for 10-A'*\n"
                 "⚠️ **Attendance risk** — *'students with low attendance'*\n"
                 "💰 **Pending fees** — *'pending fees'*\n"
                 "📢 **Notices** — *'any announcements'*")
@@ -2541,6 +2570,9 @@ def answer_principal(question, forced_intent=None):
 
     elif intent == "class_teacher_lookup":
         return handle_class_teacher_lookup(question)
+
+    elif intent == "class_teacher":
+        return handle_class_teacher(question)
 
     elif intent == "low_attendance_count":
         return handle_low_attendance_count()
