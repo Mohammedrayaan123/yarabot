@@ -15,7 +15,7 @@ import mysql.connector
 import pandas as pd
 from auth_helpers import hash_password, verify_password
 from config import DB_CONFIG
-from nlp_helpers import check_phrase_safety, apply_phrase_to_intent_data
+from nlp_helpers import check_phrase_safety, apply_phrase_to_intent_data, ALWAYS_SCORED_INTENTS
 from app import ROLE_PERSONAL_INTENTS
 from validators import (
     validate_name, validate_class, validate_contact,
@@ -1899,15 +1899,30 @@ elif page == "Learned Phrases":
     else:
         for cid, phrase_text, resolved_intent, role, ask_count, first_asked, last_asked in candidates:
             # Every role list that resolved_intent shows up in, unioned -
-            # so check_phrase_safety() can tell "conflicts with an intent
-            # that's actually scored alongside this one" apart from a
-            # same-named collision in an unrelated role's intent list.
+            # so check_phrase_safety()'s diagnostic warnings can tell
+            # "shares vocabulary with an intent that's actually scored
+            # alongside this one" apart from a same-named overlap in an
+            # unrelated role's intent list.
             same_role_intents = {
                 other for role_list in ROLE_PERSONAL_INTENTS.values()
                 if resolved_intent in role_list
                 for other in role_list if other != resolved_intent
             }
-            status, reason = check_phrase_safety(phrase_text, resolved_intent, same_role_intents)
+            # role_groups: the actual go/no-go now (see check_phrase_safety()'s
+            # docstring) - one full real candidate list PER role resolved_intent
+            # appears in (greeting/thanks/help always folded in too, since
+            # every role's real detect_intent() call includes them even though
+            # ROLE_PERSONAL_INTENTS itself doesn't), so the routing simulation
+            # matches exactly what a live question in that role would face -
+            # not the flattened same_role_intents union, which would blur
+            # separate roles' candidate lists together and reject phrases that
+            # are actually fine in each role on its own.
+            role_groups = [
+                set(role_list) | ALWAYS_SCORED_INTENTS
+                for role_list in ROLE_PERSONAL_INTENTS.values()
+                if resolved_intent in role_list
+            ]
+            status, reason = check_phrase_safety(phrase_text, resolved_intent, same_role_intents, role_groups)
             tag = "🟢 Safe to add" if status == "safe" else "🔴 Needs review"
 
             with st.expander(f'({ask_count}x) "{phrase_text}" → {resolved_intent} [{role}] — {tag}'):
