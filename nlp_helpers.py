@@ -36,13 +36,19 @@ INTENT_DATA = {
         # phrasing with no verb or pronoun.
         "phrases": ["how many days present", "how many days absent", "attendance percentage",
                     "attendance %", "my attendance", "attendance status", "attendance record",
-                    "check attendance", "how's my attendance"],
+                    "check attendance", "how's my attendance",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "attendence", "check my attendence", "my attendence status", "how many days have i missed", "did i bunk too much", "how many days was i absent", "how many days was i present", "days present count", "days absent count", "how many absences do i have", "total days absent", "total days present"],
         "keywords": ["attendance", "present", "presence", "absent", "absentee", "bunk", "bunked"],
     },
     "exam": {
         "phrases": ["exam date", "next exam", "when is my exam", "test date",
                     "exam dates", "upcoming exam", "upcoming exams", "next test",
-                    "my exam date", "check exam date"],
+                    "my exam date", "check exam date",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "wen is my exam", "xam date", "test dates pls", "when do i have exams", "tell me my exam dates", "gimme exam dates", "half yearly date", "pre board date", "prelims date", "when is half yearly", "when is pre board", "do i have an exam soon", "exam kab hai", "mera exam kab hai", "quickly tell me exam date", "just tell me when my exam is", "i need to know my exam date", "i wanted to check my exam dates", "upcoming test date", "my upcoming exams", "check my test date", "check upcoming exams"],
         "keywords": ["exam", "exams", "test", "tests", "examination", "examinations", "quiz"],
     },
     "timetable": {
@@ -59,67 +65,112 @@ INTENT_DATA = {
                     "todays classes", "time table", "class routine", "today's schedule",
                     "todays schedule", "today's timetable", "todays timetable",
                     "weekly timetable", "my periods today", "what's my schedule",
-                    "what classes today"],
+                    "what classes today",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "scedule", "my scedule", "timetabel", "my timetabel", "what do i have today", "what do i have tomorrow"],
         "keywords": ["timetable", "schedule", "periods", "classes", "routine"],
     },
     "fee": {
         "phrases": ["fee status", "fees paid", "school fees",
                     "fees status", "fee due", "fees due", "is my fee paid",
-                    "check fees", "outstanding fees", "fee balance"],
+                    "check fees", "outstanding fees", "fee balance",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "fee status pls", "fees status pls", "is my fee cleared", "is my fees cleared", "have i paid my fees", "did i pay fees", "fee payment status", "fees payment status", "do i owe fees", "do i owe any fees", "fee ka status", "meri fees paid hai kya", "check my fees", "check fee status", "my fee details", "tuition status", "tuition fee status", "term fee status", "fees due date", "last date for fees", "fee balance check", "outstanding balance", "how much fee do i owe", "how much do i owe", "fee cleared or not", "fees cleared or not", "show my fee status", "gimme fee status", "tell me if my fees are paid", "i want to know my fee status", "quickly check fees", "just tell me fee status", "bro is my fee paid", "my fee history"],
         "keywords": ["fee", "fees", "payment", "paid", "dues", "due"],
     },
     "period_count": {
-        "phrases": ["how many periods", "number of periods", "periods today", "periods this week"],
+        "phrases": ["how many periods", "number of periods", "periods today", "periods this week",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "period count today", "show my period count", "just tell me period count", "how many lectures today", "how many lectures this week", "weekly period count", "daily period count", "total lectures i have", "my period load today", "workload today", "how heavy is my day"],
         "keywords": ["periods", "period"],
     },
     "classes_assigned": {
-        "phrases": ["which classes", "my classes", "classes assigned", "classes i teach"],
+        "phrases": ["which classes", "my classes", "classes assigned", "classes i teach",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "which sections am i assigned", "sections i handle", "grades assigned to me", "sections covered by me"],
         "keywords": ["classes", "class", "assigned", "teach"],
     },
     "total_students": {
-        "phrases": ["how many students", "total students", "number of students"],
+        "phrases": ["how many students", "total students", "number of students",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "total student count", "how many students in school", "how many students enrolled", "total strength", "school strength", "overall student count", "how many kids in school", "how many students do we have", "enrollment numbers", "total enrollment", "give me student count", "gimme student total", "quickly tell me student count", "just give me student total", "school student total", "total pupils", "how many pupils", "number of pupils", "students enrolled total", "overall enrollment", "school population", "total kids enrolled"],
         "keywords": ["students", "student"],
     },
     "total_teachers": {
-        "phrases": ["how many teachers", "total teachers", "number of teachers"],
+        "phrases": ["how many teachers", "total teachers", "number of teachers",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "total staff count", "how many staff members", "how many faculty", "total faculty", "number of faculty members", "faculty size", "how many educators"],
         "keywords": ["teachers", "teacher", "staff"],
     },
     "class_wise_count": {
-        "phrases": ["students per class", "class wise", "class-wise", "breakdown by class"],
+        "phrases": ["students per class", "class wise", "class-wise", "breakdown by class",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "section wise count", "breakdown by section", "gimme classwise breakdown", "class-wise breakdown pls", "how many per section", "just give me the breakdown", "section distribution"],
         "keywords": ["breakdown", "classwise"],
     },
     "greeting": {
-        "phrases": ["good morning", "good afternoon", "good evening"],
+        "phrases": ["good morning", "good afternoon", "good evening",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "hii", "hiii", "heyy", "heya", "yo yo", "sup", "wassup", "good day", "morning", "hey there", "hi there", "hello there", "salaam", "assalam o alaikum", "namaste", "hi bot", "hey bot", "hi nova", "hey nova"],
         "keywords": ["hi", "hello", "hey", "yo"],
     },
     "thanks": {
-        "phrases": ["thank you", "thanks a lot"],
+        "phrases": ["thank you", "thanks a lot",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "thanks bro", "thank u", "thnx", "tysm", "much appreciated", "appreciate it", "thanks a ton", "cheers", "thanks so much", "thankyou", "thank you so much", "great thanks", "ok thanks", "perfect thanks", "thanks for that", "thanks nova", "thank you nova", "thx a lot", "many thanks", "thanks a bunch"],
         "keywords": ["thanks", "thank", "thx", "ty"],
     },
     "help": {
-        "phrases": ["what can you do", "help me", "what do you do"],
+        "phrases": ["what can you do", "help me", "what do you do",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "what can u do", "what do u do", "how do i use this", "how does this work", "what can this bot do", "options pls", "show me options", "show commands", "list commands", "i need help", "help pls", "help plz", "can u help me", "what should i ask", "what can i ask you", "guide me", "how to use this bot", "what are my options", "menu", "show menu"],
         "keywords": ["help", "options", "commands"],
     },
 
     # ---- Student expansion ----
     "identity": {
-        "phrases": ["what is my name", "who am i", "my details", "my info", "share my identity card info"],
+        "phrases": ["what is my name", "who am i", "my details", "my info", "share my identity card info",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "show my info", "show my profile", "my profile", "my id card info", "id card details", "gimme my info", "identity card details", "show identity card", "my info pls", "my personal info", "personal details pls", "my record", "show my record", "verify my identity", "my basic info", "profile details", "account details", "my account info"],
         "keywords": ["name", "who"],
     },
     "roll_number": {
-        "phrases": ["my roll number", "what is my roll", "roll no", "roll number", "my enrollment number please"],
+        "phrases": ["my roll number", "what is my roll", "roll no", "roll number", "my enrollment number please",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "tell me my roll no", "roll number pls", "my roll no pls", "give me my roll number", "gimme roll no", "show my roll number", "quickly tell me roll no", "just tell me roll number", "roll no kya hai", "mera roll number kya hai", "my enrollment no", "enrollment number pls", "my admission number", "admission no", "my seat number", "roll no check", "check my roll number", "confirm my roll no", "roll id", "my roll id", "id number pls"],
         "keywords": ["roll"],
     },
     "my_class": {
-        "phrases": ["what class am i in", "which class am i", "my class","which grade am i in"],
+        "phrases": ["what class am i in", "which class am i", "my class","which grade am i in",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "what grade am i in", "my grade", "my section", "which section am i in", "which grade and section", "what section am i", "which standard am i in", "my standard", "standard and section", "which grade do i study in", "am i in grade 10"],
         "keywords": ["class","grade"],
     },
     "next_period": {
-        "phrases": ["next period", "next class", "what's next"],
+        "phrases": ["next period", "next class", "what's next",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "after this what do i have", "right after this"],
         "keywords": ["next"],
     },
     "subject_teacher": {
-        "phrases": ["who teaches me", "who is my teacher for", "teacher for"],
+        "phrases": ["who teaches me", "who is my teacher for", "teacher for",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "my math sir", "my science maam", "my english maam"],
         "keywords": ["teaches", "teacher"],
     },
 
@@ -130,12 +181,18 @@ INTENT_DATA = {
         "keywords": ["next"],
     },
     "current_class": {
-        "phrases": ["what am i teaching now", "current class", "right now"],
+        "phrases": ["what am i teaching now", "current class", "right now",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "what am i doing right now"],
         "keywords": ["now", "current"],
     },
     "free_periods": {
         "phrases": ["free periods", "am i free", "do i have a free period",
-                    "any free time"],
+                    "any free time",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "any spare time today", "do i have a gap today", "when do i get a break", "any breaks today"],
         # "periods" keyword needed: "free periods today" was tying 4-4 with
         # period_count (its "periods today" phrase also matches), and list
         # order would silently pick period_count's weekly total instead.
@@ -149,24 +206,36 @@ INTENT_DATA = {
         # More phrasings added to close that gap.
         "phrases": ["periods left", "how many periods left", "periods remaining today",
                     "how many periods do i have left", "how many periods left today",
-                    "how many more periods"],
+                    "how many more periods",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "am i done for the day", "am i almost done", "quickly how many left", "how much longer today", "how many more today", "am i finished for today"],
         # "periods" keyword needed for the same reason as free_periods above -
         # without it this ties 4-4 with period_count and falls back to list
         # order.
         "keywords": ["remaining", "left", "periods"],
     },
     "teacher_identity": {
-        "phrases": ["what is my name", "who am i", "my details", "my subject"],
+        "phrases": ["what is my name", "who am i", "my details", "my subject",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "show my profile", "my profile", "my employee details", "employee id", "my contact details", "my registered contact", "my personal info", "my record", "show my record", "my basic info"],
         "keywords": ["name", "who"],
     },
 
     # ---- Principal expansion ----
     "teacher_location": {
-        "phrases": ["where is", "which class is teaching", "what is teaching right now"],
+        "phrases": ["where is", "which class is teaching", "what is teaching right now",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "wheres mr ahmed", "wheres ms priya", "which room is he in", "which room is she in", "where can i find", "gimme location of", "just tell me where he is", "which classroom is he in", "which classroom is she in"],
         "keywords": ["where", "location"],
     },
     "classroom_occupant": {
-        "phrases": ["who is teaching class", "who is in class", "which teacher is in"],
+        "phrases": ["who is teaching class", "who is in class", "which teacher is in",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "whos teaching 10a", "who's occupying that room", "who's in room 10a", "occupant check"],
         "keywords": ["teaching", "occupant"],
     },
     "free_teachers": {
@@ -242,7 +311,10 @@ INTENT_DATA = {
         "keywords": ["pending", "unpaid"],
     },
     "teacher_count_by_subject": {
-        "phrases": ["how many teachers teach", "teachers for subject"],
+        "phrases": ["how many teachers teach", "teachers for subject",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "faculty count for a subject"],
         "keywords": ["teachers"],
     },
 
@@ -254,7 +326,10 @@ INTENT_DATA = {
     # hierarchy task this came from.
     "department_free_teachers": {
         "phrases": ["teachers in my department are free", "free teachers in my department",
-                    "who is free in my department", "which teachers in my department are free"],
+                    "who is free in my department", "which teachers in my department are free",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "who's not busy in my dept", "who's around in my dept"],
         "keywords": ["department", "free", "teachers"],
     },
     "department_schedule_today": {
@@ -264,7 +339,10 @@ INTENT_DATA = {
     },
     "department_teacher_count": {
         "phrases": ["how many teachers are in my department", "how many teachers in my department",
-                    "department teacher count", "teacher count for my department"],
+                    "department teacher count", "teacher count for my department",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "how many faculty in my dept", "dept headcount", "total faculty in my dept", "dept strength"],
         "keywords": ["department", "teachers"],
     },
 
@@ -282,7 +360,10 @@ INTENT_DATA = {
                     "any updates", "recent announcements", "any notices",
                     "any notice", "new notices", "any new announcements",
                     "old announcements", "older announcements", "old notices",
-                    "older notices", "urgent notices", "any urgent notices"],
+                    "older notices", "urgent notices", "any urgent notices",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "anything new", "any news", "any updates today", "any circulars", "new circular", "latest circular", "any memo", "any important notice", "check notices", "check announcements", "gimme notices", "gimme announcements", "show notices", "show announcements", "quickly any notices", "just tell me any updates", "bro any announcements", "anything posted recently", "any school updates", "any admin updates", "recent updates", "notices for me", "notices for today", "todays notices", "this weeks notices", "any notice board updates", "notice board pls", "koi notice hai kya", "koi announcement hai", "any fresh notices", "check notice board"],
         "keywords": ["notice", "notices", "announcement", "announcements", "urgent"],
     },
     # Deliberately NOT "what subjects" alone - that also matches a teacher
@@ -292,7 +373,10 @@ INTENT_DATA = {
     "subjects_offered": {
         "phrases": ["subjects does the school", "subjects does yara",
                     "subjects are offered", "subjects offered", "school subjects",
-                    "list of subjects", "subjects available", "subjects does this school"],
+                    "list of subjects", "subjects available", "subjects does this school",
+                    # ---- Bulk-generated 2026-09-05, collision-checked via
+                    # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
+                    "what subjects can i take", "curriculum list", "list of subjects offered", "which subjects exist here", "subjects taught here", "gimme subject list", "quickly list all subjects", "just tell me the subjects offered", "bro what subjects does the school have", "curriculum offered", "what streams are offered", "science stream subjects", "commerce stream subjects", "arts stream subjects", "optional subjects list", "full subject list", "school curriculum subjects", "subjects taught at this school", "does the school offer computer science", "does the school offer economics", "is commerce offered", "is arts stream offered", "check subjects offered", "find subject list"],
         "keywords": ["subjects", "curriculum"],
     },
 }
