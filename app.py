@@ -499,16 +499,30 @@ def _nlp_lane_decision(question, role):
         elif len(ranked) > 1 and (nlp_score - ranked[1][1]) < NLP_MARGIN_THRESHOLD:
             # Classifier-as-tiebreaker: rather than showing "Did you mean
             # X or Y?" straight away, give the classifier one shot at
-            # picking between JUST the tied candidates (up to the top 3
-            # rank_intents() already returns) - /api/chat calls it with
-            # this exact list + their INTENT_DESCRIPTIONS and only falls
-            # back to the clarification text below if it disagrees with
-            # every candidate or the call fails. Most real ties are a
+            # picking between JUST the tied candidates - /api/chat calls
+            # it with this exact list + their INTENT_DESCRIPTIONS and only
+            # falls back to the clarification text below if it disagrees
+            # with every candidate or the call fails. Most real ties are a
             # human-obvious call from the wording alone ("who's in charge
             # of my class" -> class_teacher, not the whole subject
             # roster) - no reason to bother the user when the classifier
             # can settle it the same way it already settles a genuine miss.
-            tie_candidates = ranked[:3]
+            #
+            # Only genuine contenders make the list - real bug found via
+            # live testing: naively taking rank_intents()'s own top 3
+            # handed the classifier a distant 3rd-place option it had no
+            # way to recognize as non-competitive from a bare name +
+            # description alone ("who teaches 9b" tied school_wide_
+            # subject_teacher/class_teacher_lookup at 4-4, but the 3rd
+            # slot - class_teacher at score 1, nowhere near the real tie -
+            # got picked anyway, a wrong answer that couldn't have
+            # happened before this feature existed). A candidate only
+            # joins if it's within NLP_MARGIN_THRESHOLD of the TOP score -
+            # the same bar that made ranked[0]/ranked[1] too close to
+            # trust in the first place, so a genuine 3-way near-tie still
+            # gets all 3 options, but a clear 4-4-vs-1 does not.
+            tie_candidates = [pair for pair in ranked[:3]
+                               if ranked[0][1] - pair[1] < NLP_MARGIN_THRESHOLD]
             clarification = _ambiguity_clarification(ranked[0][0], ranked[1][0])
             return False, True, None, 0, clarification, tie_candidates
 
