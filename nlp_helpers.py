@@ -36,7 +36,7 @@ INTENT_DATA = {
         # phrasing with no verb or pronoun.
         "phrases": ["how many days present", "how many days absent", "attendance percentage",
                     "attendance %", "my attendance", "attendance status", "attendance record",
-                    "check attendance", "how's my attendance",
+                    "check attendance", "how is my attendance",
                     # ---- Bulk-generated 2026-09-05, collision-checked via
                     # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
                     "attendence", "check my attendence", "my attendence status", "how many days have i missed", "did i bunk too much", "how many days was i absent", "how many days was i present", "days present count", "days absent count", "how many absences do i have", "total days absent", "total days present"],
@@ -64,7 +64,7 @@ INTENT_DATA = {
         "phrases": ["my timetable", "my schedule", "class schedule", "today's classes",
                     "todays classes", "time table", "class routine", "today's schedule",
                     "todays schedule", "today's timetable", "todays timetable",
-                    "weekly timetable", "my periods today", "what's my schedule",
+                    "weekly timetable", "my periods today", "what is my schedule",
                     "what classes today",
                     # ---- Bulk-generated 2026-09-05, collision-checked via
                     # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
@@ -160,7 +160,7 @@ INTENT_DATA = {
         "keywords": ["class","grade"],
     },
     "next_period": {
-        "phrases": ["next period", "next class", "what's next",
+        "phrases": ["next period", "next class", "what is next",
                     # ---- Bulk-generated 2026-09-05, collision-checked via
                     # check_phrase_safety() one at a time (see check_bulk_phrases.py) ----
                     "after this what do i have", "right after this"],
@@ -177,7 +177,7 @@ INTENT_DATA = {
     # ---- Teacher expansion ----
     "next_class": {
         "phrases": ["next class", "what am i teaching next", "which class next",
-                    "next period", "what's next"],
+                    "next period", "what is next"],
         "keywords": ["next"],
     },
     "current_class": {
