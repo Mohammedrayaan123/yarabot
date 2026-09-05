@@ -219,13 +219,37 @@ CREATE TABLE IF NOT EXISTS system_logs (
 )
 """
 
+# Audit trail for the classifier-as-tiebreaker routing path (app.py's
+# _nlp_lane_decision()): every time NLP finds a margin<2 tie instead of a
+# confident winner, the classifier gets one shot at picking between just
+# the tied candidates before the user ever sees a "did you mean" prompt.
+# nlp_candidates stores "intent(score)" pairs comma-joined (e.g.
+# "class_teacher(8),class_teacher_lookup(6)") - enough to see what NLP was
+# actually torn between without a separate join table for a handful of
+# ad-hoc names per row. classifier_pick is NULL when the classifier
+# disagreed with every candidate or the call failed - resolved=0 in that
+# case, so a real "did you mean" clarification still went to the user;
+# both outcomes are logged so the auto-resolve rate (not just the
+# successes) can be audited later.
+tables["tie_break_log"] = """
+CREATE TABLE IF NOT EXISTS tie_break_log (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    question VARCHAR(500),
+    role VARCHAR(20),
+    nlp_candidates VARCHAR(300),
+    classifier_pick VARCHAR(100),
+    resolved TINYINT(1),
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # FK order: departments must exist before teachers (teachers.department_id).
 # timetable/teacher_subjects/class_teachers need subjects/teachers, so those
 # go after both. system_logs needs users to already exist (performed_by FK).
 creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "class_teachers",
                    "students", "timetable", "exams", "notes", "notices",
                    "unanswered_questions", "learned_phrases", "users",
-                   "system_settings", "system_logs"]
+                   "system_settings", "system_logs", "tie_break_log"]
 
 for table_name in creation_order:
     cursor.execute(tables[table_name])

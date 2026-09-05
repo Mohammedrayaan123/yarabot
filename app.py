@@ -305,6 +305,30 @@ def _ambiguity_clarification(intent_a, intent_b):
     return f"Did you mean {desc_a}, or {desc_b}?"
 
 
+def _log_tie_break(question, role, candidates, classifier_pick, resolved):
+    """
+    Persists one classifier-as-tiebreaker outcome to tie_break_log (see
+    setup_database.py) - both successes AND failures, so the auto-resolve
+    rate itself can be audited later, not just which intents it picked
+    when it worked. candidates: the (name, score) pairs from
+    get_routing_decision()'s tie_candidates, in score order.
+
+    Must fail open like every other step in this pipeline - a logging
+    failure (DB hiccup, etc.) should never take down the actual reply the
+    user is waiting on, so this only ever prints on error, never raises.
+    """
+    candidates_str = ",".join(f"{name}({score})" for name, score in candidates)
+    try:
+        query(
+            "INSERT INTO tie_break_log (question, role, nlp_candidates, classifier_pick, resolved) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (question, role, candidates_str, classifier_pick, int(resolved)),
+            fetch=False
+        )
+    except Exception as e:
+        print(f'[TIE-BREAK LOG ERROR] {e}')
+
+
 def use_nlp_lane(question, role):
     """
     True routes to the NLP lane, False means Gemini, the classifier, or a
@@ -324,12 +348,26 @@ def get_routing_decision(question, role):
     trigger rule.
 
     Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
-    nlp_score: int, clarification: str|None). At most one of use_nlp /
+    nlp_score: int, clarification: str|None,
+    tie_candidates: list[tuple[str, int]]|None). At most one of use_nlp /
     try_classifier / (clarification is not None) is ever truthy; all falsy
-    means go straight to Gemini. nlp_intent/nlp_score are for logging only -
-    whichever weak (or absent) NLP match, if any, existed when the decision
-    was made. clarification, when not None, is the "Did you mean X or Y?"
-    text /api/chat should return directly instead of dispatching to any lane.
+    means go straight to Gemini. nlp_intent/nlp_score are for logging
+    only - whichever weak (or absent) NLP match, if any, existed when the
+    decision was made.
+
+    tie_candidates is non-None ONLY for a margin<2 NLP tie (try_classifier
+    also True in that case): the 2-3 (intent_name, score) pairs NLP
+    couldn't confidently pick between, in score order (rank_intents()'s
+    own return shape) - /api/chat should give the classifier one shot at
+    choosing among JUST these names before giving up to `clarification`
+    (always also set here, as the fallback "Did you mean X or Y?" text if
+    the classifier disagrees with every candidate or the call fails).
+
+    For the OTHER try_classifier case (a genuine miss - NLP scored zero or
+    too weak, tie_candidates is None), `clarification` is None and the
+    classifier gets the full role intent list instead, falling through to
+    Gemini on failure - unchanged from before this function grew a
+    tie-break mode.
     """
     return _nlp_lane_decision(question, role)
 
@@ -378,7 +416,10 @@ def _nlp_lane_decision(question, role):
     can't drift apart.
 
     Returns (use_nlp: bool, try_classifier: bool, nlp_intent: str|None,
-    nlp_score: int, clarification: str|None).
+    nlp_score: int, clarification: str|None,
+    tie_candidates: list[tuple[str, int]]|None) - see
+    get_routing_decision()'s own docstring for what each means to
+    /api/chat, tie_candidates especially.
 
     AMBIGUITY GUARD: a raw top score from rank_intents() isn't trusted on
     its own anymore. It must clear NLP_SCORE_FLOOR (too weak otherwise -
@@ -387,9 +428,10 @@ def _nlp_lane_decision(question, role):
     winner - "who is my teacher?" ties identity/subject_teacher at 1 each,
     "how many teachers teach?" ties teacher_count_by_subject/total_teachers
     at 5 each; list order used to silently decide both). A margin failure
-    returns a "Did you mean X or Y?" clarification instead of guessing -
-    checked BEFORE the phrase-match/pronoun/almanac logic below, since even
-    a phrase-backed score-3+ match must still clear this first.
+    hands the tied candidates to the classifier for one tie-break attempt
+    (see tie_candidates above) rather than guessing OR immediately asking
+    the user - checked BEFORE the phrase-match/pronoun/almanac logic below,
+    since even a phrase-backed score-3+ match must still clear this first.
 
     Asks NLP directly whether it recognizes the question as one of its own
     intents for this role, rather than gating on PERSONAL_SIGNALS pronouns
@@ -429,7 +471,7 @@ def _nlp_lane_decision(question, role):
     first that would just fail again and reach Gemini one step later anyway.
     """
     if is_pure_greeting(question):
-        return True, False, None, 0, None
+        return True, False, None, 0, None, None
 
     # Policy-frame language wins outright, even over a possessive pronoun -
     # see POLICY_FRAME_SIGNALS/is_policy_framed() above. Checked before the
@@ -437,12 +479,12 @@ def _nlp_lane_decision(question, role):
     # policy" must not reach the personal attendance-lookup handler just
     # because it says "my".
     if is_policy_framed(question):
-        return False, False, None, 0, None
+        return False, False, None, 0, None, None
 
     has_personal_pronoun = role not in DB_FIRST_ROLES and is_personal_question(question)
 
     if not has_personal_pronoun and is_general_knowledge_question(question):
-        return False, False, None, 0, None
+        return False, False, None, 0, None, None
 
     ranked = rank_intents(question, ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
     ranked = _apply_subject_scoring_adjustment(ranked, question)
@@ -455,17 +497,30 @@ def _nlp_lane_decision(question, role):
             # gets its normal chance), rather than NLP guessing on it.
             intent, nlp_score = None, 0
         elif len(ranked) > 1 and (nlp_score - ranked[1][1]) < NLP_MARGIN_THRESHOLD:
-            return False, False, None, 0, _ambiguity_clarification(ranked[0][0], ranked[1][0])
+            # Classifier-as-tiebreaker: rather than showing "Did you mean
+            # X or Y?" straight away, give the classifier one shot at
+            # picking between JUST the tied candidates (up to the top 3
+            # rank_intents() already returns) - /api/chat calls it with
+            # this exact list + their INTENT_DESCRIPTIONS and only falls
+            # back to the clarification text below if it disagrees with
+            # every candidate or the call fails. Most real ties are a
+            # human-obvious call from the wording alone ("who's in charge
+            # of my class" -> class_teacher, not the whole subject
+            # roster) - no reason to bother the user when the classifier
+            # can settle it the same way it already settles a genuine miss.
+            tie_candidates = ranked[:3]
+            clarification = _ambiguity_clarification(ranked[0][0], ranked[1][0])
+            return False, True, None, 0, clarification, tie_candidates
 
     # Phrase-backed match (score >= 3): trust it outright, no need to even
     # check the almanac - a real phrase match is strong enough evidence on
     # its own (and nlp_helpers.py's AMBIGUOUS_KEYWORDS fix already keeps
     # bare-keyword matches honest).
     if intent is not None and nlp_score >= NLP_PHRASE_MATCH_SCORE:
-        return True, False, intent, nlp_score, None
+        return True, False, intent, nlp_score, None, None
 
     if has_personal_pronoun and intent is not None:
-        return True, False, intent, nlp_score, None
+        return True, False, intent, nlp_score, None, None
 
     almanac_score = almanac_top_score(question)
     almanac_confident = almanac_score >= ALMANAC_STRONG_MATCH_SCORE and almanac_score >= nlp_score
@@ -476,17 +531,17 @@ def _nlp_lane_decision(question, role):
         # classifier's turn. Otherwise the weak match wins on its own
         # merits, same as before.
         if almanac_confident:
-            return False, True, intent, nlp_score, None
-        return True, False, intent, nlp_score, None
+            return False, True, intent, nlp_score, None, None
+        return True, False, intent, nlp_score, None, None
 
     # intent is None: a genuine zero, with or without personal-pronoun
     # wording. A confident almanac match still wins outright with no need
     # for the classifier; otherwise this is exactly the "neither lane
     # confident" gap the classifier exists to catch.
     if almanac_score >= ALMANAC_STRONG_MATCH_SCORE:
-        return False, False, None, 0, None
+        return False, False, None, 0, None, None
 
-    return False, True, None, 0, None
+    return False, True, None, 0, None, None
 
 app = Flask(__name__)
 
@@ -1107,29 +1162,29 @@ def chat():
                   f'follow_up={question_lower!r} -> falling through to normal routing')
 
     # ROUTING:
-    # Lane 0: Ambiguity clarification - two (or more) intents scored too
-    #         close together to trust a silent winner (see
-    #         _nlp_lane_decision()'s NLP_SCORE_FLOOR/NLP_MARGIN_THRESHOLD).
-    #         Returns the "Did you mean X or Y?" text directly, no DB call,
-    #         no AI call.
     # Lane 1: Personal question → NLP + MySQL (private, personal data).
     #         Already instant (a single DB lookup), so it stays a normal
     #         JSON response - streaming would add complexity for no benefit
     #         on an answer that arrives in one piece anyway.
-    # Lane 2: AI classifier - the "neither lane is confident" last line of
-    #         defense (see get_routing_decision()/_nlp_lane_decision()'s
-    #         docstring) before giving up to the generic fallback. Also a
-    #         plain JSON response, same reasoning as Lane 1.
+    # Lane 2: AI classifier - fires two different ways (see
+    #         get_routing_decision()/_nlp_lane_decision()'s docstring):
+    #         (a) tie-break, when NLP found a close top-2/3 with no
+    #         confident winner - the classifier picks between JUST those
+    #         candidates, falling back to Lane 0 only if it disagrees with
+    #         all of them or the call fails; (b) genuine miss, when NLP
+    #         found nothing confident at all - the classifier gets the
+    #         full role intent list, falling back to Lane 3 on failure.
+    #         Also a plain JSON response, same reasoning as Lane 1.
+    # Lane 0: Ambiguity clarification - the tie-break classifier itself
+    #         declined to pick (see Lane 2a). Returns the "Did you mean X
+    #         or Y?" text directly, no further DB/AI call.
     # Lane 3: General question → Gemini + almanac (school-wide info).
     #         Gemini calls take a few seconds; this lane streams so the
     #         reply appears incrementally instead of the user staring at
     #         the typing indicator for the whole round trip.
 
-    use_nlp, try_classifier, weak_intent, weak_score, clarification = get_routing_decision(question_lower, role)
-
-    if clarification is not None:
-        print(f'[AMBIGUITY CLARIFICATION] Question: {question_lower} -> {clarification!r}')
-        return jsonify({"reply": clarification})
+    use_nlp, try_classifier, weak_intent, weak_score, clarification, tie_candidates = \
+        get_routing_decision(question_lower, role)
 
     if use_nlp:
         # Personal lane — use NLP + MySQL
@@ -1149,12 +1204,50 @@ def chat():
         _maybe_set_pending_clarification(role, reply, question_lower)
         return jsonify({"reply": reply})
 
-    # CLASSIFIER LANE: fires whenever get_routing_decision() found NEITHER
-    # lane confident - NLP's best score was zero or weak AND the almanac
-    # had no strong competing match either. This is the genuine last line
-    # of defense before the generic Gemini "I don't have that information"
-    # fallback, not a narrow edge case - a question either lane already
-    # confidently resolved never reaches here at all.
+    if try_classifier and tie_candidates:
+        # TIE-BREAK: NLP found a margin<2 top-2/3 (tie_candidates, in
+        # score order) instead of a confident winner. Give the classifier
+        # one shot at choosing among JUST these specific candidates - with
+        # their real descriptions, so it's picking between concrete
+        # options instead of classifying from scratch - before the user
+        # ever sees a clarifying question. Same fail-open contract as the
+        # genuine-miss classifier call below: any failure here just means
+        # a real ambiguity (or an outage) neither system can silently
+        # guess through, so it degrades to the clarification text instead
+        # of Gemini (a "Did you mean X or Y?" is more useful than a
+        # generic non-answer when NLP already narrowed it to 2-3 options).
+        candidate_names = [name for name, _ in tie_candidates]
+        try:
+            classified_intent = classify_personal_intent(
+                question_lower, role, candidate_names, intent_descriptions=INTENT_DESCRIPTIONS
+            )
+        except Exception as e:
+            print(f'[TIE-BREAK ERROR] Question: {question_lower} -> {e}')
+            classified_intent = None
+
+        resolved = classified_intent in candidate_names
+        _log_tie_break(question_lower, role, tie_candidates,
+                        classified_intent if resolved else None, resolved)
+
+        if resolved:
+            print(f'[TIE-BREAK RESOLVED] Question: {question_lower} -> {classified_intent} '
+                  f'(candidates: {tie_candidates})')
+            reply = _dispatch_to_role_handler(role, question_lower, linked_id, forced_intent=classified_intent)
+            _maybe_set_pending_clarification(role, reply, question_lower)
+            if reply not in _CLARIFICATION_PROMPTS:
+                log_learned_phrase(question_lower, classified_intent, role)
+            return jsonify({"reply": reply})
+
+        print(f'[TIE-BREAK FAILED -> CLARIFICATION] Question: {question_lower} -> '
+              f'classifier picked {classified_intent!r} (not in {candidate_names})')
+        return jsonify({"reply": clarification})
+
+    # CLASSIFIER LANE (genuine miss): fires whenever get_routing_decision()
+    # found NEITHER lane confident - NLP's best score was zero or weak AND
+    # the almanac had no strong competing match either. This is the
+    # genuine last line of defense before the generic Gemini "I don't have
+    # that information" fallback, not a narrow edge case - a question
+    # either lane already confidently resolved never reaches here at all.
     if try_classifier:
         # classify_personal_intent() already catches its own errors and
         # returns None on any failure - this try/except is a second,

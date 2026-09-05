@@ -297,8 +297,26 @@ def ask_groq(question, context):
 # way nlp_helpers.py's keyword lists weren't taught, before falling
 # through to the generic Gemini fallback.
 # =========================================================
-def classify_personal_intent(question, role, possible_intents):
-    intent_list = "\n".join(f"- {name}" for name in possible_intents)
+def classify_personal_intent(question, role, possible_intents, intent_descriptions=None):
+    """
+    intent_descriptions: optional {intent_name: description} (app.py's own
+    INTENT_DESCRIPTIONS - not imported here, app.py already imports FROM
+    this module, so it's passed in instead, same pattern as
+    possible_intents itself). When given, each category line in the
+    prompt carries its plain-English description alongside the raw name -
+    lets the model choose between a SHORT, specific set of real options
+    (app.py's tie-break path passes just the 2-3 intents NLP was actually
+    torn between) instead of guessing blind from a bare identifier like
+    "class_teacher_lookup" vs "class_teacher". Omitted (the original
+    behavior) for the full-role-list classifier call, where there's no
+    tie-break context driving the choice.
+    """
+    if intent_descriptions:
+        intent_list = "\n".join(
+            f"- {name}: {intent_descriptions.get(name, '')}" for name in possible_intents
+        )
+    else:
+        intent_list = "\n".join(f"- {name}" for name in possible_intents)
     prompt = f"""A {role} at a school is using a chatbot. Decide which ONE category their question belongs to.
 
 CATEGORIES:

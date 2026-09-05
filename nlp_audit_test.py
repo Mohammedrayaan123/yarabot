@@ -148,10 +148,26 @@ class RouterProbe:
     def run(self, case: str, role: str, question: str) -> Result:
         predicted, score = nlp_helpers.detect_intent_with_score(question, ROLE_INTENTS[role])
         candidates = ranked_candidates(question, role)
-        use_nlp, try_classifier, _routing_intent, _routing_score, clarification = \
+        use_nlp, try_classifier, _routing_intent, _routing_score, clarification, tie_candidates = \
             app.get_routing_decision(question, role)
 
+        # Classifier-as-tiebreaker: a margin<2 NLP tie no longer resolves
+        # straight to a clarification - it goes to the (live, non-
+        # deterministic) classifier first, exactly like a genuine miss
+        # does below. This harness deliberately never calls live AI
+        # providers (see module docstring), so it can only report that
+        # this case WOULD go to the classifier, with `clarification` kept
+        # as the fallback text for if that call disagrees/fails - not
+        # simulate which outcome actually happens.
+        if try_classifier and tie_candidates:
+            return Result(case, role, question, predicted, score, candidates,
+                           "classifier (not called) [tie-break]", None, False, "", clarification)
+
         if clarification is not None:
+            # Shouldn't happen anymore - clarification is only ever set
+            # alongside tie_candidates now - kept as a defensive fallback
+            # in case a future _nlp_lane_decision() change reintroduces a
+            # direct-clarification path without updating this probe.
             return Result(case, role, question, predicted, score, candidates,
                            "ambiguity-clarification (not called)", None, False, "", clarification)
 
