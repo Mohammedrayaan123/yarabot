@@ -1,8 +1,11 @@
 
-import ast
 import difflib
 import re
+import time
 
+import mysql.connector
+
+from config import DB_CONFIG
 from validators import GRADE_SECTION_PATTERN, EARLY_YEARS_CLASSES
 
 # ---- Filler / stopwords - words that don't tell us the TOPIC ----
@@ -30,6 +33,13 @@ CONTRACTIONS = {
 # ---- Each intent's keyword/phrase list. Bigger + more varied = smarter bot.
 # Multi-word phrases are checked FIRST (more reliable), single words checked
 # after with fuzzy typo-matching.
+#
+# NOTE: the "phrases" lists here are the SEED/bootstrap set only - at
+# request time, score_intent() reads the LIVE phrase list from the
+# DB-backed cache below (see "LIVE PHRASE CACHE"), not this dict directly.
+# Editing a phrase here only changes what a fresh, not-yet-migrated
+# database gets seeded with; "keywords"/"class_code_bypass" are NOT
+# hot-reloadable and are still read from here directly.
 INTENT_DATA = {
     "attendance": {
         # "attendance %" / "check attendance" etc. cover terse phone-typed
@@ -557,6 +567,140 @@ INTENT_DATA = {
 }
 
 
+# =========================================================
+# LIVE PHRASE CACHE — hot-reload without a restart
+# INTENT_DATA above is the SEED/bootstrap definition only. At request time,
+# every intent's actual phrase list comes from the `intent_phrases` MySQL
+# table (source='seed'/'learned'/'manual' - see setup_database.py for the
+# one-time seed migration and dashboard.py's Learned Phrases page for how
+# 'learned'/'manual' rows get added), via the cache below on a 60s TTL -
+# so a dashboard approval reaches students without a git push/redeploy,
+# which was the entire point: a teacher approving a phrase at 9am
+# shouldn't mean students wait for the next deploy.
+#
+# Deliberately a plain module-level dict, not anything shared across
+# processes (no Redis - not needed at this scale). dashboard.py and app.py
+# are separate processes (and, in production, separate hosts: the
+# dashboard runs locally against the shared Aiven DB, app.py runs on
+# Render), so each has its OWN copy of this cache. The dashboard's
+# "Refresh NLP Now" button clears its own copy (incidental - the dashboard
+# itself doesn't score live questions) and also calls app.py's own
+# /api/admin/refresh-nlp-cache endpoint to force the LIVE process to
+# reload instantly too - see app.py's refresh_nlp_cache() route.
+# =========================================================
+_PHRASE_CACHE_TTL = 60  # seconds
+_phrase_cache = {"data": None, "loaded_at": 0.0}
+
+
+def _fetch_phrases_from_db():
+    """One SELECT, grouped by intent. Returns None on ANY failure (can't
+    connect, table missing, query error) so refresh_phrase_cache() can
+    fail open to whatever's already cached instead of wiping it out - same
+    fail-open philosophy as app.py's kill switch/_chatbot_enabled()."""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+    except mysql.connector.Error:
+        return None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT intent_name, phrase FROM intent_phrases")
+        rows = cursor.fetchall()
+        cursor.close()
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+    grouped = {}
+    for intent_name, phrase in rows:
+        grouped.setdefault(intent_name, []).append(phrase)
+    return grouped
+
+
+def refresh_phrase_cache(force=False):
+    """Reloads the phrase cache from intent_phrases if the TTL has
+    expired, or unconditionally when force=True (the dashboard's "Refresh
+    NLP Now" button, and add_phrase() after every successful insert).
+
+    Fail-open on any DB trouble: a fetch failure or a genuinely empty
+    table both leave an already-loaded cache untouched - loaded_at is
+    still bumped either way, so a down DB is retried once per TTL window,
+    not once per request (score_intent()'s latency must not depend on the
+    DB being up). The ONLY time this falls back to INTENT_DATA's own seed
+    phrases is the very first call in this process, before anything has
+    ever loaded successfully - this is what lets a fresh deploy against a
+    brand-new, not-yet-migrated database keep working with zero manual
+    setup.
+    """
+    now = time.time()
+    if not force and _phrase_cache["data"] is not None and now - _phrase_cache["loaded_at"] < _PHRASE_CACHE_TTL:
+        return
+
+    fetched = _fetch_phrases_from_db()
+    if fetched:
+        _phrase_cache["data"] = fetched
+    elif _phrase_cache["data"] is None:
+        _phrase_cache["data"] = {name: list(data["phrases"]) for name, data in INTENT_DATA.items()}
+    _phrase_cache["loaded_at"] = now
+
+
+def _phrases_for(intent_name):
+    """The live phrase list for one intent - what score_intent() actually
+    matches against. Falls back to INTENT_DATA's own seed list for an
+    intent the cache doesn't know about yet (e.g. a brand new intent added
+    in code before setup_database.py's migration has run again for it)."""
+    refresh_phrase_cache()
+    cached = _phrase_cache["data"]
+    if intent_name in cached:
+        return cached[intent_name]
+    return INTENT_DATA.get(intent_name, {}).get("phrases", [])
+
+
+def add_phrase(phrase, intent_name, source, added_by=None):
+    """
+    Adds `phrase` to intent_name's live phrase list - backs the
+    dashboard's Learned-Phrases "Approve" action (source='learned') and
+    its manual-add form (source='manual'). Inserts into intent_phrases and
+    force-refreshes THIS process's own cache so the phrase is queryable
+    immediately from wherever add_phrase() was called; dashboard.py
+    additionally calls app.py's /api/admin/refresh-nlp-cache afterward so
+    the live bot's own separate process picks it up instantly too, not
+    just the dashboard's copy.
+
+    Raises ValueError if intent_name isn't a real intent (a typo'd
+    resolved_intent would otherwise silently insert a row nothing ever
+    scores against). Raises RuntimeError if the database can't be reached
+    - a write should surface failure to the admin clicking the button, not
+    fail open the way the read-side cache does.
+
+    Returns True if a new row was inserted, False if this exact phrase was
+    already registered under this intent (no-op, not an error).
+    """
+    if intent_name not in INTENT_DATA:
+        raise ValueError(f"Intent '{intent_name}' not found in INTENT_DATA")
+
+    if phrase in _phrases_for(intent_name):
+        return False
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+    except mysql.connector.Error as e:
+        raise RuntimeError(f"Could not reach the database: {e}")
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO intent_phrases (intent_name, phrase, source, added_by) VALUES (%s, %s, %s, %s)",
+            (intent_name, phrase, source, added_by)
+        )
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+
+    refresh_phrase_cache(force=True)
+    return True
+
+
 # Words that legitimately belong to a personal-data intent's keyword list
 # but also show up in general almanac content ("teachers day", "exam week
 # dates", "which classes are on holiday"). A bare match on one of these
@@ -668,7 +812,8 @@ def tokenize(question):
     return [w for w in words if w not in STOPWORDS]
 
 
-def score_intent(cleaned_question, words, intent_name, personal_signal, class_code_present=False):
+def score_intent(cleaned_question, words, intent_name, personal_signal, class_code_present=False,
+                  phrase_override=None):
     """
     Score a question against one intent. Phrase matches outweigh single
     keywords, since phrases are more specific.
@@ -679,12 +824,18 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
     class_code_present is the same kind of bypass, but opt-in per intent
     (INTENT_DATA's class_code_bypass) so a stray class code elsewhere
     doesn't loosen every intent's protection.
+
+    phrase_override: internal use only (see _score_with_candidate()) - a
+    phrase list to score against instead of the live DB-backed cache, used
+    to simulate "what if this candidate phrase were added" without
+    actually adding it.
     """
     data = INTENT_DATA[intent_name]
     score = 0
 
     phrase_matched = False
-    for phrase in data["phrases"]:
+    phrases = phrase_override if phrase_override is not None else _phrases_for(intent_name)
+    for phrase in phrases:
         # \b-anchored, not a bare substring `in` check - "next period" was
         # matching inside "next periodical" (word-glued at the tail), same
         # bug class as extract_teacher_name_from_question()'s "Ann"/"annual".
@@ -810,22 +961,15 @@ ALWAYS_SCORED_INTENTS = {"greeting", "thanks", "help"}
 
 def _score_with_candidate(cleaned, words, intent_name, personal, code_present,
                            target_intent, candidate_phrase):
-    """score_intent(), but with `candidate_phrase` temporarily spliced into
-    target_intent's real phrase list first - so scoring target_intent
-    reflects what it would actually score AFTER this phrase is added, not
-    just its current phrase list. Mutates INTENT_DATA only for the
-    duration of one score_intent() call, always restored via finally -
-    the one deliberate, tightly-scoped exception to this module's
-    otherwise read-only relationship with its own data during a check."""
+    """score_intent(), but for target_intent, scored as if candidate_phrase
+    were already added to its LIVE phrase list - via score_intent()'s
+    phrase_override, not by mutating anything shared, so this never
+    touches the cache other requests may be reading concurrently."""
     if intent_name != target_intent:
         return score_intent(cleaned, words, intent_name, personal, code_present)
 
-    original = INTENT_DATA[target_intent]["phrases"]
-    INTENT_DATA[target_intent]["phrases"] = original + [candidate_phrase]
-    try:
-        return score_intent(cleaned, words, target_intent, personal, code_present)
-    finally:
-        INTENT_DATA[target_intent]["phrases"] = original
+    override = _phrases_for(target_intent) + [candidate_phrase]
+    return score_intent(cleaned, words, target_intent, personal, code_present, phrase_override=override)
 
 
 def _simulate_group_verdict(cleaned, words, personal, code_present, target_intent,
@@ -959,7 +1103,7 @@ def check_phrase_safety(phrase, target_intent, same_role_intents=None, role_grou
     # ---- Diagnostic-only: literal keyword/phrase text overlap. Never a
     # blocker on its own anymore - see docstring above. ----
     warnings = []
-    for other_intent, data in INTENT_DATA.items():
+    for other_intent in INTENT_DATA:
         if other_intent == target_intent:
             continue
 
@@ -970,14 +1114,14 @@ def check_phrase_safety(phrase, target_intent, same_role_intents=None, role_grou
         else:
             role_note = " [different role - informational only]"
 
-        for existing_phrase in data.get("phrases", []):
+        for existing_phrase in _phrases_for(other_intent):
             if existing_phrase and (existing_phrase in cleaned or cleaned in existing_phrase):
                 warnings.append(
                     f'overlaps existing phrase "{existing_phrase}" already registered under '
                     f"'{other_intent}'{role_note}"
                 )
 
-        shared_keywords = set(words) & set(data.get("keywords", []))
+        shared_keywords = set(words) & set(INTENT_DATA[other_intent].get("keywords", []))
         if shared_keywords:
             warnings.append(
                 f"shares keyword(s) {sorted(shared_keywords)} with '{other_intent}'{role_note}"
@@ -1028,100 +1172,3 @@ def check_phrase_safety(phrase, target_intent, same_role_intents=None, role_grou
     if warnings:
         return "safe", "diagnostic warnings (non-blocking): " + "; ".join(warnings)
     return "safe", ""
-
-
-def _quote_literal(text):
-    """Double-quoted, matching this file's own string style - falls back to
-    repr() only if the text itself contains a double quote, which would
-    otherwise break out of the literal."""
-    if '"' not in text:
-        return f'"{text}"'
-    return repr(text)
-
-
-def apply_phrase_to_intent_data(phrase, target_intent, file_path=None):
-    """
-    Appends `phrase` to target_intent's "phrases" list, editing THIS FILE'S
-    OWN SOURCE on disk - the dashboard's Learned Phrases "Approve" action.
-
-    Uses ast.parse() to find the exact source position of the last element
-    in target_intent's phrases list (or the list's own position, if empty),
-    then inserts as plain text at that exact line/column - regardless of
-    whether the list is written on one line or wrapped across several (see
-    the file's own phrases lists for both styles). A blind regex/string
-    replace can't reliably tell "the end of THIS intent's phrases list"
-    from a similar-looking line elsewhere; AST position info can.
-
-    Does NOT reformat/re-wrap the edited line afterward - it may end up
-    longer than this file's usual style. Left for an optional manual
-    cleanup pass rather than risking a naive line-wrapping heuristic
-    corrupting the surrounding formatting.
-
-    Re-parses the edited source before writing anything - if the result
-    wouldn't itself be valid Python, the file on disk is left untouched
-    and this raises instead.
-
-    Option A (see gemini_rag.py's LEARNED PHRASES section): this edits the
-    source file, but the nlp_helpers module already loaded in the running
-    Flask process keeps its OLD INTENT_DATA in memory until restarted -
-    dashboard.py must say so next to the Approve button, not imply this is
-    instant like the Almanac editor.
-
-    Returns True if the phrase was inserted, False if it was already
-    present (no-op, not an error). Raises ValueError if target_intent
-    doesn't exist in INTENT_DATA, or if it has no "phrases" list.
-    """
-    path = file_path or __file__
-    with open(path, "r", encoding="utf-8") as f:
-        source = f.read()
-    lines = source.splitlines(keepends=True)
-
-    tree = ast.parse(source)
-    intent_data_node = next(
-        (node.value for node in ast.walk(tree)
-         if isinstance(node, ast.Assign)
-         and any(isinstance(t, ast.Name) and t.id == "INTENT_DATA" for t in node.targets)),
-        None
-    )
-    if intent_data_node is None or not isinstance(intent_data_node, ast.Dict):
-        raise ValueError(f"Could not locate INTENT_DATA dict in {path}")
-
-    target_dict_node = next(
-        (v for k, v in zip(intent_data_node.keys, intent_data_node.values)
-         if isinstance(k, ast.Constant) and k.value == target_intent),
-        None
-    )
-    if target_dict_node is None:
-        raise ValueError(f"Intent '{target_intent}' not found in INTENT_DATA")
-
-    phrases_list_node = next(
-        (v for k, v in zip(target_dict_node.keys, target_dict_node.values)
-         if isinstance(k, ast.Constant) and k.value == "phrases"),
-        None
-    )
-    if phrases_list_node is None or not isinstance(phrases_list_node, ast.List):
-        raise ValueError(f"Intent '{target_intent}' has no \"phrases\" list to append to")
-
-    existing = [el.value for el in phrases_list_node.elts if isinstance(el, ast.Constant)]
-    if phrase in existing:
-        return False
-
-    if phrases_list_node.elts:
-        last = phrases_list_node.elts[-1]
-        insert_line, insert_col = last.end_lineno, last.end_col_offset
-        insertion = f", {_quote_literal(phrase)}"
-    else:
-        insert_line = phrases_list_node.lineno
-        insert_col = phrases_list_node.col_offset + 1  # just past the opening "["
-        insertion = _quote_literal(phrase)
-
-    target_line = lines[insert_line - 1]
-    lines[insert_line - 1] = target_line[:insert_col] + insertion + target_line[insert_col:]
-
-    new_source = "".join(lines)
-    ast.parse(new_source)  # fail loudly rather than write a broken file
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(new_source)
-
-    return True

@@ -8,6 +8,7 @@ duplicate the database, it'll just make sure it exists).
 
 import mysql.connector
 from config import DB_CONFIG
+from nlp_helpers import INTENT_DATA
 
 # Connect without a database selected yet, since we're about to create it.
 connection_settings = {k: v for k, v in DB_CONFIG.items() if k != "database"}
@@ -243,17 +244,56 @@ CREATE TABLE IF NOT EXISTS tie_break_log (
 )
 """
 
+# Backs nlp_helpers.py's hot-reloadable phrase cache (see its "LIVE PHRASE
+# CACHE" section) - the live source of truth for every intent's phrase
+# list, INTENT_DATA in nlp_helpers.py is only the seed/bootstrap copy from
+# here on. source records where a row came from: 'seed' (this file's
+# one-time migration below), 'learned' (dashboard Learned Phrases
+# approval), 'manual' (dashboard's direct-add form). No UNIQUE constraint
+# on (intent_name, phrase) - dedup is handled in application code
+# (nlp_helpers.add_phrase()) instead, same reasoning as this project's
+# other natural-key-free tables (a long VARCHAR in a composite unique key
+# risks index-length limits depending on the MySQL host's settings).
+tables["intent_phrases"] = """
+CREATE TABLE IF NOT EXISTS intent_phrases (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    intent_name VARCHAR(100),
+    phrase VARCHAR(500),
+    source ENUM('seed','learned','manual') DEFAULT 'seed',
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    added_by VARCHAR(100)
+)
+"""
+
 # FK order: departments must exist before teachers (teachers.department_id).
 # timetable/teacher_subjects/class_teachers need subjects/teachers, so those
 # go after both. system_logs needs users to already exist (performed_by FK).
 creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "class_teachers",
                    "students", "timetable", "exams", "notes", "notices",
                    "unanswered_questions", "learned_phrases", "users",
-                   "system_settings", "system_logs", "tie_break_log"]
+                   "system_settings", "system_logs", "tie_break_log", "intent_phrases"]
 
 for table_name in creation_order:
     cursor.execute(tables[table_name])
     print(f"Table '{table_name}' ready.")
+
+# One-time seed migration: intent_phrases starts empty on a fresh/existing
+# DB, and nlp_helpers.py's INTENT_DATA is the bootstrap source of truth for
+# it. Guarded on the table being empty rather than a run-once flag, so this
+# stays safe to run every time this script runs, same as every CREATE
+# TABLE above - it only ever seeds a table nothing has populated yet.
+cursor.execute("SELECT COUNT(*) FROM intent_phrases")
+if cursor.fetchone()[0] == 0:
+    seed_rows = [
+        (intent_name, phrase, "seed")
+        for intent_name, data in INTENT_DATA.items()
+        for phrase in data["phrases"]
+    ]
+    cursor.executemany(
+        "INSERT INTO intent_phrases (intent_name, phrase, source) VALUES (%s, %s, %s)",
+        seed_rows
+    )
+    print(f"Seeded intent_phrases with {len(seed_rows)} phrases from INTENT_DATA.")
 
 # The other half of the circular departments<->teachers FK (see the
 # departments table comment above) - teachers now exists, so this can

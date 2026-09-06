@@ -27,11 +27,12 @@ import secrets
 import time
 import json
 import math
+import hmac
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
-from nlp_helpers import detect_intent, detect_intent_with_score, rank_intents
+from nlp_helpers import detect_intent, detect_intent_with_score, rank_intents, refresh_phrase_cache
 from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent, log_learned_phrase
 from config import DB_CONFIG
 from validators import GRADE_SECTION_PATTERN, EARLY_YEARS_CLASSES
@@ -567,6 +568,22 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 if not os.environ.get("FLASK_SECRET_KEY"):
     print("WARNING: FLASK_SECRET_KEY not set - using a random key for this run only. "
           "Set FLASK_SECRET_KEY before deploying so sessions survive restarts.")
+
+# Shared secret the admin dashboard presents to /api/admin/refresh-nlp-cache
+# below. dashboard.py is a genuinely separate process (in production, a
+# separate host too - the dashboard runs locally against the shared Aiven
+# DB while this app runs on Render) with no Flask session here at all, so
+# it can't use session.get('role') the way kill_switch() below does -
+# needs its own shared secret instead. Must be set to the SAME value in
+# this app's environment AND dashboard.py's own (its local .env even in
+# dev) - falls back to a random per-run value like FLASK_SECRET_KEY above,
+# which means the dashboard's own default won't match until both sides set
+# the real env var.
+DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN") or secrets.token_hex(32)
+if not os.environ.get("DASHBOARD_API_TOKEN"):
+    print("WARNING: DASHBOARD_API_TOKEN not set - using a random value for this run only. "
+          "The dashboard's 'Refresh NLP Now' button can't reach this endpoint until the "
+          "same DASHBOARD_API_TOKEN is set on both sides.")
 
 _is_production = os.environ.get("FLASK_ENV") == "production"
 
@@ -1120,6 +1137,25 @@ def kill_switch():
         ("disable", session.get("user_id"))
     )
     return jsonify({"success": True, "enabled": False})
+
+
+@app.route("/api/admin/refresh-nlp-cache", methods=["POST"])
+def refresh_nlp_cache():
+    """Called by dashboard.py's "Refresh NLP Now" button - a separate
+    process (and, in production, a separate host) with no Flask session
+    here, so it authenticates with the DASHBOARD_API_TOKEN shared secret
+    instead of session.get('role') like kill_switch() above.
+    hmac.compare_digest avoids a timing side-channel on the comparison,
+    same reasoning as auth_helpers.verify_password. Forces THIS process's
+    own in-memory phrase cache (nlp_helpers.refresh_phrase_cache()) to
+    reload from intent_phrases immediately instead of waiting out its
+    normal 60s TTL - the whole point of the dashboard button."""
+    token = request.headers.get("X-Dashboard-Token", "")
+    if not hmac.compare_digest(token, DASHBOARD_API_TOKEN):
+        return jsonify({"error": "Forbidden."}), 403
+
+    refresh_phrase_cache(force=True)
+    return jsonify({"success": True})
 
 
 # =========================================================

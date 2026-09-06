@@ -10,12 +10,14 @@ Run: streamlit run dashboard.py
 import os
 import time
 import datetime
+import urllib.request
+import urllib.error
 import streamlit as st
 import mysql.connector
 import pandas as pd
 from auth_helpers import hash_password, verify_password
 from config import DB_CONFIG
-from nlp_helpers import check_phrase_safety, apply_phrase_to_intent_data, ALWAYS_SCORED_INTENTS
+from nlp_helpers import check_phrase_safety, add_phrase, refresh_phrase_cache, INTENT_DATA, ALWAYS_SCORED_INTENTS
 from app import ROLE_PERSONAL_INTENTS
 from validators import (
     validate_name, validate_class, validate_contact,
@@ -89,6 +91,46 @@ ADMIN_PASSWORD_HASH = os.environ.get(
 if "DASHBOARD_ADMIN_PASSWORD_HASH" not in os.environ:
     print("WARNING: DASHBOARD_ADMIN_PASSWORD_HASH not set - using the default "
           "admin/admin123 login. Set it before deploying for real.")
+
+# Lets "Refresh NLP Now" (Learned Phrases page) reach app.py's own
+# /api/admin/refresh-nlp-cache - a genuinely separate process, and in
+# production a separate host too (this dashboard runs locally against the
+# shared Aiven DB while app.py runs on Render), so this dashboard's own
+# nlp_helpers cache can't reach app.py's copy on its own. Point
+# FLASK_APP_URL at the live Render URL to make the button reach production;
+# defaults to localhost for local dev against a locally-running app.py.
+# DASHBOARD_API_TOKEN must be set to the SAME value as app.py's own env var.
+FLASK_APP_URL = os.environ.get("FLASK_APP_URL", "http://localhost:5000")
+DASHBOARD_API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "")
+if not DASHBOARD_API_TOKEN:
+    print("WARNING: DASHBOARD_API_TOKEN not set - 'Refresh NLP Now' won't be able to reach "
+          "the live app instantly. Approved/manual phrases still reach it on their own "
+          "within the normal 60-second cache TTL.")
+
+
+def _refresh_live_nlp_cache():
+    """POSTs to app.py's refresh-nlp-cache endpoint so an approved/manual
+    phrase is queryable on the LIVE bot right away, not just in this
+    dashboard process's own copy of the cache (add_phrase() already
+    force-refreshes that one). Best-effort: a failure here (app.py not
+    running, wrong FLASK_APP_URL, token mismatch) doesn't mean the phrase
+    wasn't saved - it just means the live app catches up on its own 60s
+    TTL instead of instantly. Uses stdlib urllib, not requests - avoids
+    adding a new dependency for one small internal POST."""
+    req = urllib.request.Request(
+        f"{FLASK_APP_URL}/api/admin/refresh-nlp-cache",
+        method="POST",
+        headers={"X-Dashboard-Token": DASHBOARD_API_TOKEN},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except (urllib.error.URLError, OSError) as e:
+        st.warning(
+            f"⚠️ Saved, but couldn't reach the live app at {FLASK_APP_URL} to refresh it "
+            f"instantly ({e}). It'll pick up this change within 60 seconds on its own."
+        )
+        return False
 
 # Failed-login rate limiting - resets on server restart, which is fine at
 # this scale (single admin, single school).
@@ -1861,27 +1903,33 @@ elif page == "Suggested Additions":
 # change the collision picture for another still pending review, so a
 # stored verdict would go stale and actively mislead.
 #
-# Approve edits nlp_helpers.py's INTENT_DATA directly on disk (Option A) -
-# this does NOT take effect until app.py is restarted, since the running
-# Flask process already has the OLD module loaded in memory. Said
-# explicitly next to the button below, unlike the Almanac editor's
-# genuinely-instant apply, so the two don't get confused. Option B (a
-# hot-reloadable phrases file, same mtime-based auto-reload pattern as
-# the almanac) is a deliberate future upgrade, not an oversight - see
-# gemini_rag.py's LEARNED PHRASES section for the full reasoning.
+# Approve writes to the live intent_phrases table (nlp_helpers.add_phrase(),
+# source='learned') instead of editing nlp_helpers.py's source on disk -
+# the old on-disk-edit approach (kept a phrase invisible to the live bot
+# until the next restart) is exactly what the DB-backed phrase cache below
+# replaces. See nlp_helpers.py's "LIVE PHRASE CACHE" section for the full
+# design; "Refresh NLP Now" forces both this dashboard's own cache AND the
+# separately-running app.py process to reload instantly instead of waiting
+# out the normal 60-second TTL.
 # =========================================================
 elif page == "Learned Phrases":
     st.title("🧠 Learned Phrases")
     st.caption(
         "Phrasings the AI classifier figured out that NLP's own scoring missed, sorted "
-        "by how often they've been asked. Approving one adds it to NLP's phrase list "
-        "directly, so it's answered instantly next time with no AI call needed."
+        "by how often they've been asked. Approving one adds it to NLP's live phrase "
+        "list, so it's answered instantly next time with no AI call needed."
     )
-    st.warning(
-        "⚠️ **Approve edits nlp_helpers.py on disk, but does NOT take effect until the "
-        "app is restarted.** The running server already has the old phrase list loaded "
-        "in memory - this is not an instant-apply action like the Almanac editor."
+    st.caption(
+        "Reaches the live bot within 60 seconds automatically, or instantly via "
+        "'Refresh NLP Now' below."
     )
+
+    if st.button("🔄 Refresh NLP Now"):
+        refresh_phrase_cache(force=True)
+        if _refresh_live_nlp_cache():
+            st.success("✅ Refreshed — the live app will use every approved/manual phrase immediately.")
+
+    st.divider()
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -1934,14 +1982,14 @@ elif page == "Learned Phrases":
 
                 col1, col2 = st.columns(2)
                 approve_clicked = col1.button("Approve", key=f"approve_btn_{cid}")
-                col1.caption("Takes effect after the next app restart.")
+                col1.caption("Live within 60 seconds, or instantly via 'Refresh NLP Now' above.")
                 dismiss_clicked = col2.button("Dismiss", key=f"dismiss_btn_{cid}")
 
                 if approve_clicked:
                     try:
-                        inserted = apply_phrase_to_intent_data(phrase_text, resolved_intent)
-                    except ValueError as e:
-                        st.error(f"Could not apply: {e}")
+                        inserted = add_phrase(phrase_text, resolved_intent, source="learned", added_by=ADMIN_USERNAME)
+                    except (ValueError, RuntimeError) as e:
+                        st.error(f"Could not add: {e}")
                     else:
                         conn = get_connection()
                         cursor = conn.cursor()
@@ -1950,12 +1998,10 @@ elif page == "Learned Phrases":
                         cursor.close()
                         conn.close()
                         if inserted:
-                            st.success(
-                                f'✅ Added "{phrase_text}" to \'{resolved_intent}\' in nlp_helpers.py. '
-                                "Restart the app for this to take effect."
-                            )
+                            _refresh_live_nlp_cache()
+                            st.success(f'✅ Added "{phrase_text}" to \'{resolved_intent}\' — live now.')
                         else:
-                            st.info("Already present in nlp_helpers.py - marked resolved.")
+                            st.info("Already present — marked resolved.")
                         st.rerun()
 
                 if dismiss_clicked:
@@ -1967,3 +2013,51 @@ elif page == "Learned Phrases":
                     conn.close()
                     st.warning("Dismissed.")
                     st.rerun()
+
+    st.divider()
+    st.subheader("➕ Add a phrase manually")
+    st.caption(
+        "For a phrasing you already know is missing, without waiting for the AI "
+        "classifier to surface it above. Runs the same safety check first."
+    )
+    # greeting/thanks/help excluded: app.py's is_pure_greeting() gates entry
+    # to those three via its OWN hardcoded GREETING_ONLY_PHRASES exact-match
+    # allowlist (deliberately separate from INTENT_DATA - a past fuzzy-match
+    # bug let "Shark Tank?" match "thank"), never by scoring INTENT_DATA's
+    # phrase list - so a phrase added to one of these three here would be
+    # accepted and stored, but never actually reachable by a real question.
+    addable_intents = sorted(set(INTENT_DATA.keys()) - {"greeting", "thanks", "help"})
+    with st.form("manual_add_phrase_form", clear_on_submit=True):
+        manual_phrase = st.text_input("Phrase")
+        manual_intent = st.selectbox("Intent", addable_intents)
+        manual_submitted = st.form_submit_button("Check & Add")
+
+    if manual_submitted:
+        manual_phrase = manual_phrase.strip().lower()
+        if not manual_phrase:
+            st.error("Enter a phrase first.")
+        else:
+            same_role_intents = {
+                other for role_list in ROLE_PERSONAL_INTENTS.values()
+                if manual_intent in role_list
+                for other in role_list if other != manual_intent
+            }
+            role_groups = [
+                set(role_list) | ALWAYS_SCORED_INTENTS
+                for role_list in ROLE_PERSONAL_INTENTS.values()
+                if manual_intent in role_list
+            ]
+            status, reason = check_phrase_safety(manual_phrase, manual_intent, same_role_intents, role_groups)
+            if status != "safe":
+                st.error(f"🔴 Needs review — {reason}")
+            else:
+                try:
+                    inserted = add_phrase(manual_phrase, manual_intent, source="manual", added_by=ADMIN_USERNAME)
+                except (ValueError, RuntimeError) as e:
+                    st.error(f"Could not add: {e}")
+                else:
+                    if inserted:
+                        _refresh_live_nlp_cache()
+                        st.success(f'✅ Added "{manual_phrase}" to \'{manual_intent}\' — live now.')
+                    else:
+                        st.info("Already present for this intent.")

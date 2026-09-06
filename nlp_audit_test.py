@@ -131,22 +131,50 @@ HANDLER_TO_INTENT = {
 
 
 class RouterProbe:
-    """Temporarily instruments app.py without altering its source or persistent state."""
+    """Temporarily instruments app.py without altering its source or persistent state.
+
+    Also seeds nlp_helpers' live phrase cache straight from INTENT_DATA and
+    stubs out refresh_phrase_cache() for the duration of the probe -
+    score_intent() now reads phrases from that DB-backed cache (see
+    nlp_helpers.py's "LIVE PHRASE CACHE" section), and this harness must
+    stay exactly what its own module docstring promises: deterministic,
+    and never touching MySQL. Without this, a real DB connection attempt
+    would either hang/fail in an offline test environment, or - worse -
+    silently pull in whatever learned/manual phrases happen to be in the
+    live intent_phrases table right now, making a "did the CODE'S routing
+    logic regress" run depend on unrelated, time-varying DB state.
+    """
 
     def __init__(self):
         self.original_query = app.query
         self.original_handlers = {name: getattr(app, name) for name in HANDLER_NAMES}
+        self.original_refresh_phrase_cache = nlp_helpers.refresh_phrase_cache
 
     def __enter__(self):
         app.query = fake_query
+        nlp_helpers.refresh_phrase_cache = self._noop_refresh_phrase_cache
+        nlp_helpers._phrase_cache["data"] = {
+            name: list(data["phrases"]) for name, data in nlp_helpers.INTENT_DATA.items()
+        }
         for name in HANDLER_NAMES:
             setattr(app, name, self._marker(name))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         app.query = self.original_query
+        nlp_helpers.refresh_phrase_cache = self.original_refresh_phrase_cache
+        nlp_helpers._phrase_cache["data"] = None
+        nlp_helpers._phrase_cache["loaded_at"] = 0.0
         for name, handler in self.original_handlers.items():
             setattr(app, name, handler)
+
+    @staticmethod
+    def _noop_refresh_phrase_cache(force=False):
+        """Stands in for nlp_helpers.refresh_phrase_cache() - __enter__
+        already seeded the cache straight from INTENT_DATA, so this just
+        keeps _phrases_for() from ever replacing it with a real DB fetch
+        for the life of the probe."""
+        return
 
     @staticmethod
     def _marker(name: str) -> Callable:
