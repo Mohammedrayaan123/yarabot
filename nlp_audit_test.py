@@ -96,6 +96,7 @@ HANDLER_NAMES = [
     "handle_class_teacher_lookup", "handle_class_teacher", "handle_low_attendance_count",
     "handle_pending_fees_count", "handle_teacher_count_by_subject", "handle_department_free_teachers",
     "handle_department_schedule_today", "handle_department_teacher_count",
+    "handle_complaint_feedback",
 ]
 
 # Handler names are not always the intent spelling (for example,
@@ -127,6 +128,7 @@ HANDLER_TO_INTENT = {
     "handle_department_free_teachers": "department_free_teachers",
     "handle_department_schedule_today": "department_schedule_today",
     "handle_department_teacher_count": "department_teacher_count",
+    "handle_complaint_feedback": "complaint_feedback",
 }
 
 
@@ -309,6 +311,18 @@ BREAKING_INPUTS = [
     # A plain teacher-style question must still resolve normally for an hod
     # login - HOD_DEPARTMENT_INTENTS is additive, not a replacement.
     ("hod:still-sees-teacher-intents", "hod", "what is my timetable"),
+    # Student -> VP complaint channel - checked against the full student
+    # bucket for collisions with subject_teacher/notices/etc.
+    # complaint_summary (vice_principal-only) is deliberately NOT exercised
+    # anywhere in this harness: it's not in ROLE_PERSONAL_INTENTS at all
+    # (see app.py's VP_ONLY_INTENTS/_personal_intents_for_role() - a raw-
+    # role-scoped addition on top of the "hod" effective bucket, which this
+    # harness's RouterProbe has no equivalent "vice_principal" role branch
+    # for). Its phrases were collision-checked separately via a one-off
+    # script against the real vice_principal candidate list before being
+    # added to nlp_helpers.INTENT_DATA.
+    ("student:complaint-feedback", "student", "i want to complain"),
+    ("student:complaint-feedback-teacher", "student", "my teacher is being unfair"),
 ]
 
 

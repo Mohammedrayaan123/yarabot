@@ -226,7 +226,7 @@ HOD_DEPARTMENT_INTENTS = ["department_free_teachers", "department_schedule_today
 ROLE_PERSONAL_INTENTS = {
     "student": ["attendance", "exam", "timetable", "fee", "identity",
                 "roll_number", "my_class", "class_teacher", "next_period",
-                "subject_teacher", "notices", "subjects_offered"],
+                "subject_teacher", "notices", "subjects_offered", "complaint_feedback"],
     "teacher": TEACHER_INTENTS,
     "hod": TEACHER_INTENTS + HOD_DEPARTMENT_INTENTS,
     "principal": ["teacher_count_by_subject", "total_students", "total_teachers",
@@ -235,6 +235,39 @@ ROLE_PERSONAL_INTENTS = {
                   "school_wide_subject_teacher", "class_teacher_lookup", "class_teacher",
                   "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"],
 }
+
+# Complaint intent, layered ON TOP of the "hod" bucket above for the
+# vice_principal login specifically - NOT added to ROLE_PERSONAL_INTENTS
+# directly, since "hod" is a shared effective-role bucket (_effective_role
+# collapses vice_principal -> "hod") and a plain hod login must never be
+# able to detect/route to this intent (see the task this came from: HODs
+# don't see complaints, only the VP does). _personal_intents_for_role()
+# below is what actually applies this, checking the RAW role rather than
+# the effective bucket.
+VP_ONLY_INTENTS = ["complaint_summary"]
+
+
+def _personal_intents_for_role(role):
+    """The full NLP candidate list for this RAW login role: its normal
+    effective-role bucket (ROLE_PERSONAL_INTENTS[_effective_role(role)]),
+    plus VP_ONLY_INTENTS when role is literally 'vice_principal' - never
+    for a plain 'hod' login, even though both share the same effective
+    bucket everywhere else. Use this instead of
+    ROLE_PERSONAL_INTENTS.get(_effective_role(role), []) at every NLP
+    candidate-list call site so a new vice_principal-only intent can never
+    leak into hod's routing."""
+    intents = list(ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
+    if role == "vice_principal":
+        intents += VP_ONLY_INTENTS
+    return intents
+
+
+# Who can see the VP complaint dashboard/data - a set, not a hardcoded
+# 'vice_principal' string, so principal access can be added later (the VP
+# asked for this to stay his tool only, for now) with a one-line change
+# here instead of hunting down every check. Deliberately does NOT include
+# 'hod' or 'teacher' - see the task this came from.
+COMPLAINT_VIEWER_ROLES = {"vice_principal", "admin"}
 
 
 # Thresholds for the almanac-overlap tie-break (see _nlp_lane_decision).
@@ -295,6 +328,8 @@ INTENT_DESCRIPTIONS = {
     "department_teacher_count": "how many teachers are in your department",
     "notices": "the latest notices",
     "subjects_offered": "which subjects the school offers",
+    "complaint_feedback": "filing a private complaint about a teacher",
+    "complaint_summary": "the pending student complaints",
 }
 
 
@@ -487,7 +522,7 @@ def _nlp_lane_decision(question, role):
     if not has_personal_pronoun and is_general_knowledge_question(question):
         return False, False, None, 0, None, None
 
-    ranked = rank_intents(question, ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
+    ranked = rank_intents(question, _personal_intents_for_role(role))
     ranked = _apply_subject_scoring_adjustment(ranked, question)
     intent, nlp_score = ranked[0] if ranked else (None, 0)
 
@@ -914,6 +949,350 @@ def notices_seen():
     return jsonify({"success": True})
 
 
+# =========================================================
+# STUDENT -> VICE PRINCIPAL COMPLAINT SYSTEM
+# Deliberately bypasses the class-teacher/HOD/teacher layer entirely (see
+# the task this came from) - every route below either checks
+# session.get('role') == 'student' (the complaint form/history) or
+# session.get('role') in COMPLAINT_VIEWER_ROLES (the VP dashboard). No
+# teacher-facing route/endpoint exists anywhere for this feature, on
+# purpose.
+# =========================================================
+MAX_COMPLAINTS_PER_DAY = 3
+COMPLAINT_MIN_LENGTH = 20
+COMPLAINT_CATEGORIES = {"teaching_quality", "behavior", "unfair_grading", "communication", "other"}
+
+
+def _student_class_teachers(student_id):
+    """(teacher_id, name, subject_name) for every teacher who teaches this
+    student's class - via the timetable, same join shape as
+    handle_subject_teacher()'s own lookup minus its subject filter (there's
+    no direct student-class -> teacher_subjects join in this schema;
+    teacher_subjects alone isn't class-scoped, timetable is). Feeds the
+    complaint form's teacher dropdown, and re-used server-side to validate
+    a submission actually names a teacher this student could see."""
+    return query("""
+        SELECT DISTINCT te.teacher_id, te.name, s.subject_name
+        FROM timetable t
+        JOIN subjects s ON t.subject_id = s.subject_id
+        JOIN teachers te ON t.teacher_id = te.teacher_id
+        JOIN students st ON st.class = t.class
+        WHERE st.student_id = %s
+        ORDER BY te.name, s.subject_name
+    """, (student_id,), fetch=True, many=True) or []
+
+
+def _complaints_today(student_id):
+    """Count towards MAX_COMPLAINTS_PER_DAY - CURDATE(), not a rolling 24h
+    window, so the limit resets at midnight rather than exactly 24h after
+    the first complaint."""
+    result = query(
+        "SELECT COUNT(*) FROM complaints WHERE student_id=%s AND created_at >= CURDATE()",
+        (student_id,), fetch=True
+    )
+    return result[0] if result else 0
+
+
+@app.route("/complaint")
+def complaint_page():
+    """Same session/auth as the chatbot - not a separate site. Anyone not
+    logged in as a student is bounced to the login page instead of seeing
+    a form with nothing to submit against."""
+    if session.get("role") != "student":
+        return redirect(url_for("index"))
+    return render_template("complaint.html")
+
+
+@app.route("/api/complaint/init")
+def complaint_init():
+    """Dropdown data (only this student's own class's teachers) + today's
+    remaining submission count, in one call."""
+    if session.get("role") != "student":
+        return jsonify({"error": "Not logged in."}), 401
+
+    student_id = session.get("linked_id")
+    teachers = [
+        {"teacher_id": teacher_id, "name": name, "subject": subject}
+        for teacher_id, name, subject in _student_class_teachers(student_id)
+    ]
+    remaining = max(0, MAX_COMPLAINTS_PER_DAY - _complaints_today(student_id))
+    return jsonify({
+        "teachers": teachers,
+        "remaining_today": remaining,
+        "max_per_day": MAX_COMPLAINTS_PER_DAY,
+    })
+
+
+@app.route("/api/complaint", methods=["POST"])
+def complaint_submit():
+    """No profanity filter (deliberate - see the task this came from:
+    filtering upset students' own words defeats the point of a direct
+    channel) and no edit/delete afterward (a student can submit more, but
+    never retract one - prevents a teacher pressuring a student to
+    withdraw)."""
+    if session.get("role") != "student":
+        return jsonify({"success": False, "error": "Not logged in."}), 401
+
+    student_id = session.get("linked_id")
+    data = request.get_json(silent=True) or {}
+    category = data.get("category")
+    complaint_text = (data.get("complaint_text") or "").strip()
+    anonymous = bool(data.get("anonymous"))
+
+    if category not in COMPLAINT_CATEGORIES:
+        return jsonify({"success": False, "error": "Please choose a category."}), 400
+    if len(complaint_text) < COMPLAINT_MIN_LENGTH:
+        return jsonify({
+            "success": False,
+            "error": f"Please write at least {COMPLAINT_MIN_LENGTH} characters."
+        }), 400
+
+    try:
+        teacher_id = int(data.get("teacher_id"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Please choose a valid teacher."}), 400
+
+    # Must actually teach this student's class - guards against a tampered
+    # request naming a teacher never shown in this student's own dropdown.
+    valid_teacher_ids = {tid for tid, _, _ in _student_class_teachers(student_id)}
+    if teacher_id not in valid_teacher_ids:
+        return jsonify({"success": False, "error": "Please choose a valid teacher."}), 400
+
+    if _complaints_today(student_id) >= MAX_COMPLAINTS_PER_DAY:
+        return jsonify({
+            "success": False,
+            "error": f"You've reached today's limit of {MAX_COMPLAINTS_PER_DAY} complaints. Please try again tomorrow."
+        }), 429
+
+    query(
+        """INSERT INTO complaints (student_id, teacher_id, complaint_text, category, anonymous)
+           VALUES (%s, %s, %s, %s, %s)""",
+        (student_id, teacher_id, complaint_text, category, anonymous)
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/api/complaint/history")
+def complaint_history():
+    """This student's own past complaints + status - deliberately never
+    selects resolution_notes (VP's private notes), enforced at the query
+    level rather than just left out of the JSON response."""
+    if session.get("role") != "student":
+        return jsonify({"error": "Not logged in."}), 401
+
+    student_id = session.get("linked_id")
+    rows = query("""
+        SELECT c.complaint_id, t.name, c.category, c.complaint_text, c.status, c.created_at
+        FROM complaints c
+        JOIN teachers t ON c.teacher_id = t.teacher_id
+        WHERE c.student_id=%s
+        ORDER BY c.created_at DESC, c.complaint_id DESC
+    """, (student_id,), fetch=True, many=True) or []
+
+    complaints = [
+        {
+            "complaint_id": complaint_id,
+            "teacher_name": teacher_name,
+            "category": category,
+            "complaint_text": complaint_text,
+            "status": status,
+            "created_at": created_at.isoformat() if created_at else None,
+        }
+        for complaint_id, teacher_name, category, complaint_text, status, created_at in rows
+    ]
+    return jsonify({"complaints": complaints})
+
+
+def _complaint_summary_stats():
+    """Top-of-dashboard stats for the VP: total new, total this week, the
+    most-complained-about teacher (only surfaced once they have 3+, so one
+    or two isolated complaints doesn't brand a teacher unfairly), and a
+    category breakdown."""
+    total_new_row = query("SELECT COUNT(*) FROM complaints WHERE status='new'", fetch=True)
+    total_new = total_new_row[0] if total_new_row else 0
+
+    total_week_row = query(
+        "SELECT COUNT(*) FROM complaints WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)",
+        fetch=True
+    )
+    total_week = total_week_row[0] if total_week_row else 0
+
+    top_teacher = query("""
+        SELECT t.name, COUNT(*) AS cnt
+        FROM complaints c
+        JOIN teachers t ON c.teacher_id = t.teacher_id
+        GROUP BY c.teacher_id, t.name
+        HAVING COUNT(*) >= 3
+        ORDER BY cnt DESC
+        LIMIT 1
+    """, fetch=True)
+
+    category_rows = query(
+        "SELECT category, COUNT(*) FROM complaints GROUP BY category", fetch=True, many=True
+    ) or []
+
+    # Full, UNFILTERED option lists for the dashboard's filter dropdowns -
+    # queried separately from the (possibly filtered) complaint list itself
+    # so the filter options never shrink just because a filter is applied.
+    teacher_options = query("""
+        SELECT DISTINCT t.teacher_id, t.name
+        FROM complaints c JOIN teachers t ON c.teacher_id = t.teacher_id
+        ORDER BY t.name
+    """, fetch=True, many=True) or []
+    class_options = query("""
+        SELECT DISTINCT s.class
+        FROM complaints c JOIN students s ON c.student_id = s.student_id
+        ORDER BY s.class
+    """, fetch=True, many=True) or []
+
+    return {
+        "total_new": total_new,
+        "total_this_week": total_week,
+        "most_complained_teacher": (
+            {"name": top_teacher[0], "count": top_teacher[1]} if top_teacher else None
+        ),
+        "by_category": {category: count for category, count in category_rows},
+        "filter_options": {
+            "teachers": [{"teacher_id": tid, "name": name} for tid, name in teacher_options],
+            "classes": [cls for (cls,) in class_options],
+        },
+    }
+
+
+@app.route("/vp/complaints")
+def vp_complaints_page():
+    """VP-only dashboard page - see COMPLAINT_VIEWER_ROLES. Not in
+    dashboard.py: that Streamlit app is gated by one shared staff password,
+    not a per-account login, so it can't actually restrict this to just
+    the VP the way a real session role check here can."""
+    if session.get("role") not in COMPLAINT_VIEWER_ROLES:
+        return redirect(url_for("index"))
+    return render_template("vp_complaints.html")
+
+
+@app.route("/api/vp/complaints")
+def vp_complaints_list():
+    """Filterable complaint list + summary stats, in one call. Every
+    filter is optional; an omitted one is simply not applied."""
+    if session.get("role") not in COMPLAINT_VIEWER_ROLES:
+        return jsonify({"error": "Forbidden."}), 403
+
+    status = request.args.get("status")
+    teacher_id = request.args.get("teacher_id")
+    class_filter = request.args.get("class")
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+
+    conditions = []
+    params = []
+    if status:
+        conditions.append("c.status=%s")
+        params.append(status)
+    if teacher_id:
+        conditions.append("c.teacher_id=%s")
+        params.append(teacher_id)
+    if class_filter:
+        conditions.append("s.class=%s")
+        params.append(class_filter)
+    if date_from:
+        conditions.append("DATE(c.created_at) >= %s")
+        params.append(date_from)
+    if date_to:
+        conditions.append("DATE(c.created_at) <= %s")
+        params.append(date_to)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    rows = query(f"""
+        SELECT c.complaint_id, s.name, s.class, c.anonymous, t.name,
+               COALESCE(GROUP_CONCAT(DISTINCT sub.subject_name ORDER BY sub.subject_name SEPARATOR ', '), ''),
+               c.complaint_text, c.category, c.status, c.created_at
+        FROM complaints c
+        JOIN students s ON c.student_id = s.student_id
+        JOIN teachers t ON c.teacher_id = t.teacher_id
+        LEFT JOIN teacher_subjects ts ON t.teacher_id = ts.teacher_id
+        LEFT JOIN subjects sub ON ts.subject_id = sub.subject_id
+        {where}
+        GROUP BY c.complaint_id, s.name, s.class, c.anonymous, t.name,
+                 c.complaint_text, c.category, c.status, c.created_at
+        ORDER BY c.created_at DESC, c.complaint_id DESC
+    """, tuple(params), fetch=True, many=True) or []
+
+    complaints = [
+        {
+            "complaint_id": complaint_id,
+            "student_name": None if anonymous else student_name,
+            "student_class": student_class,
+            "anonymous": bool(anonymous),
+            "teacher_name": teacher_name,
+            "subject": subject or None,
+            "complaint_text": complaint_text,
+            "category": category,
+            "status": status_val,
+            "created_at": created_at.isoformat() if created_at else None,
+        }
+        for (complaint_id, student_name, student_class, anonymous, teacher_name,
+             subject, complaint_text, category, status_val, created_at) in rows
+    ]
+
+    return jsonify({"summary": _complaint_summary_stats(), "complaints": complaints})
+
+
+@app.route("/api/vp/complaints/<int:complaint_id>", methods=["POST"])
+def vp_complaint_update(complaint_id):
+    """Status change + resolution notes, saved together - resolution_notes
+    is never shown to the student/teacher (see /api/complaint/history's
+    query, which never selects it)."""
+    if session.get("role") not in COMPLAINT_VIEWER_ROLES:
+        return jsonify({"error": "Forbidden."}), 403
+
+    data = request.get_json(silent=True) or {}
+    status = data.get("status")
+    resolution_notes = data.get("resolution_notes", "")
+
+    if status not in ("new", "under_review", "resolved"):
+        return jsonify({"error": "Invalid status."}), 400
+
+    query(
+        """UPDATE complaints
+           SET status=%s, resolution_notes=%s, reviewed_at=NOW(), reviewed_by=%s
+           WHERE complaint_id=%s""",
+        (status, resolution_notes, session.get("user_id"), complaint_id)
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/api/vp/complaints-count")
+def vp_complaints_count():
+    """Chatbot bell badge count - same last_seen-by-ID pattern as
+    /api/notices-count (see setup_database.py's last_seen_complaint_id
+    comment)."""
+    if session.get("role") not in COMPLAINT_VIEWER_ROLES:
+        return jsonify({"count": 0})
+
+    result = query(
+        """SELECT COUNT(*) FROM complaints
+           WHERE complaint_id > (SELECT last_seen_complaint_id FROM users WHERE user_id=%s)""",
+        (session.get("user_id"),), fetch=True
+    )
+    return jsonify({"count": result[0] if result else 0})
+
+
+@app.route("/api/vp/complaints-seen", methods=["POST"])
+def vp_complaints_seen():
+    """Mirrors /api/notices-seen exactly - bumps last_seen_complaint_id up
+    to the current max, called both when the VP opens the dashboard page
+    and when the chatbot bell badge is clicked."""
+    if session.get("role") not in COMPLAINT_VIEWER_ROLES:
+        return jsonify({"success": False}), 403
+
+    query(
+        """UPDATE users SET last_seen_complaint_id = COALESCE((SELECT MAX(complaint_id) FROM complaints), 0)
+           WHERE user_id=%s""",
+        (session.get("user_id"),)
+    )
+    return jsonify({"success": True})
+
+
 @app.route("/api/logout", methods=["POST"])
 def logout():
     session.clear()
@@ -1068,7 +1447,7 @@ def _is_topic_switch(question, role, pending_intent):
     """
     if "?" not in question:
         return False
-    intent, score = detect_intent_with_score(question, ROLE_PERSONAL_INTENTS.get(_effective_role(role), []))
+    intent, score = detect_intent_with_score(question, _personal_intents_for_role(role))
     return intent is not None and intent != pending_intent and score >= NLP_PHRASE_MATCH_SCORE
 
 
@@ -1094,11 +1473,14 @@ def _dispatch_to_role_handler(role, question, linked_id, forced_intent=None):
     hierarchy rules once instead of re-deciding them at both /api/chat call
     sites: assistant_principal is identical to principal; hod and
     vice_principal both get everything a teacher sees plus their own
-    department-scoped intents (see HOD_LIKE_ROLES/HOD_DEPARTMENT_INTENTS)."""
+    department-scoped intents (see HOD_LIKE_ROLES/HOD_DEPARTMENT_INTENTS) -
+    vice_principal specifically (not hod) also gets VP_ONLY_INTENTS."""
     if role == "student":
         return answer_student(question, linked_id, forced_intent=forced_intent)
     if role == "teacher" or role in HOD_LIKE_ROLES:
         extra = HOD_DEPARTMENT_INTENTS if role in HOD_LIKE_ROLES else None
+        if role == "vice_principal":
+            extra = (extra or []) + VP_ONLY_INTENTS
         return answer_teacher(question, linked_id, forced_intent=forced_intent, extra_intents=extra, role=role)
     return answer_principal(question, forced_intent=forced_intent)  # principal, assistant_principal
 
@@ -1311,7 +1693,7 @@ def chat():
         # required to hold regardless of what goes wrong inside the call.
         try:
             classified_intent = classify_personal_intent(
-                question_lower, role, ROLE_PERSONAL_INTENTS.get(_effective_role(role), [])
+                question_lower, role, _personal_intents_for_role(role)
             )
         except Exception as e:
             print(f'[CLASSIFIER LANE ERROR] Question: {question_lower} -> {e}')
@@ -1806,6 +2188,17 @@ def handle_subject_teacher(question, student_id, known_subjects):
     return f"**{subject}** is taught by multiple teachers this week: {teacher_list}."
 
 
+def handle_complaint_feedback():
+    """Empathetic redirect to the private student -> Vice Principal
+    complaint form (see the /complaint route) - the chatbot itself never
+    collects or stores the complaint text here, it just points to the
+    form, so the message goes straight to the VP with no class teacher/
+    HOD/teacher ever in the loop (see the task this came from)."""
+    return ("I can help you share your feedback privately. Your message will go directly "
+            "to the Vice Principal — no teacher will see it.\n\n"
+            "👉 [Click here to file a complaint](/complaint)")
+
+
 def handle_student_timetable(question, student_id):
     """Timetable, optionally filtered to a specific day if one is mentioned.
     Extends the existing 'timetable' intent's handling rather than being a
@@ -2063,6 +2456,20 @@ def handle_department_teacher_count(teacher_id):
     result = query("SELECT COUNT(*) FROM teachers WHERE department_id=%s", (department_id,), fetch=True)
     count = result[0] if result else 0
     return f"There are **{count} teacher(s)** in your department."
+
+
+def handle_complaint_summary():
+    """Vice-principal-only: how many student complaints are currently
+    awaiting review, plus a link to the full dashboard (see the
+    /vp/complaints route). Access is enforced at the CALL SITE
+    (answer_teacher's literal role check), not here - see that function's
+    comment."""
+    result = query("SELECT COUNT(*) FROM complaints WHERE status='new'", fetch=True)
+    count = result[0] if result else 0
+    if count == 0:
+        return "No new complaints right now. 👍\n\n👉 [Open the complaints dashboard](/vp/complaints)"
+    return (f"You have **{count} new complaint{'s' if count != 1 else ''}** awaiting review.\n\n"
+            "👉 [Open the complaints dashboard](/vp/complaints)")
 
 
 def handle_teacher_timetable(question, teacher_id):
@@ -2399,7 +2806,7 @@ def answer_student(question, student_id, forced_intent=None):
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
          "identity", "roll_number", "my_class", "class_teacher", "next_period",
-         "subject_teacher", "notices", "subjects_offered"]
+         "subject_teacher", "notices", "subjects_offered", "complaint_feedback"]
     )
 
     # subject_teacher's "who teaches me"/"teacher for" phrases are about a
@@ -2427,7 +2834,8 @@ def answer_student(question, student_id, forced_intent=None):
                 "⏭ **Next period** — *'what's my next period'*\n"
                 "👩‍🏫 **Subject teacher** — *'who teaches me math'*\n"
                 "🏫 **Class teacher** — *'who is my class teacher'*\n"
-                "📢 **Notices** — *'any announcements'*")
+                "📢 **Notices** — *'any announcements'*\n"
+                "📝 **Complaint/feedback** — *'i want to complain'*")
 
     if intent == "attendance":
         result = query(
@@ -2486,6 +2894,9 @@ def answer_student(question, student_id, forced_intent=None):
     elif intent == "subjects_offered":
         return handle_subjects_offered(question)
 
+    elif intent == "complaint_feedback":
+        return handle_complaint_feedback()
+
     return ("I didn't quite get that. Try asking about:\n"
             "**attendance**, **exams**, **timetable**, **fees**, or your **details**.")
 
@@ -2493,9 +2904,9 @@ def answer_student(question, student_id, forced_intent=None):
 def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None, role="teacher"):
     # forced_intent: see answer_student()'s matching comment above.
     # extra_intents: HOD_DEPARTMENT_INTENTS when this is really an hod/
-    # vice_principal login (see _dispatch_to_role_handler) - a plain
-    # teacher is never passed any, so those intents can never be detected
-    # for one.
+    # vice_principal login, plus VP_ONLY_INTENTS for vice_principal
+    # specifically (see _dispatch_to_role_handler) - a plain teacher is
+    # never passed any, so those intents can never be detected for one.
     # role: the REAL login role (teacher/hod/vice_principal), needed only
     # for handle_notices()'s role-scoped visibility - hod/vice_principal
     # see more notices than a plain teacher even though every other branch
@@ -2519,6 +2930,13 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
             "*'my department's schedule today'*, *'how many teachers are in my department'*"
             if extra_intents else ""
         )
+        # Deliberately gated on the literal role, not `extra_intents` -
+        # HOD's own extra_intents is HOD_DEPARTMENT_INTENTS only, but this
+        # line must never appear for a plain hod (see VP_ONLY_INTENTS).
+        vp_help = (
+            "\n📋 **Complaints** — *'any new complaints'*"
+            if role == "vice_principal" else ""
+        )
         return ("Hi, I'm Nova! Here's what I can help with:\n"
                 "🕐 **Schedule** — *'show my timetable'* (add a day, e.g. 'Monday' or 'today')\n"
                 "📊 **Periods** — *'how many periods do I have'*\n"
@@ -2527,7 +2945,7 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
                 "🆓 **Free periods** — *'am I free right now'*, *'free periods today'*\n"
                 "⏳ **Periods left today** — *'how many periods do I have left'*\n"
                 "🙋 **My details** — *'who am i'*\n"
-                "📢 **Notices** — *'any announcements'*" + department_help)
+                "📢 **Notices** — *'any announcements'*" + department_help + vp_help)
 
     if intent == "period_count":
         # "periods today" is one of this intent's own phrases, so without
@@ -2591,6 +3009,17 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
 
     elif intent == "department_teacher_count":
         return handle_department_teacher_count(teacher_id)
+
+    elif intent == "complaint_summary":
+        # Belt-and-suspenders literal role check (same reasoning as
+        # app.py's kill_switch()) - complaint_summary can only ever be
+        # DETECTED for role == "vice_principal" (see
+        # _personal_intents_for_role()/VP_ONLY_INTENTS), but this guards
+        # against a future change to that gating accidentally exposing it
+        # to a plain hod login too, since HODs must never see complaints.
+        if role != "vice_principal":
+            return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
+        return handle_complaint_summary()
 
     return "I didn't understand that. Try asking about your **schedule**, **periods**, or **classes**."
 

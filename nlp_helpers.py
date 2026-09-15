@@ -564,6 +564,54 @@ INTENT_DATA = {
                     "hey what subjects are offered", "subjects available at yara", "elective subjects available", "which subjects can students choose", "subject choices available"],
         "keywords": ["subjects", "curriculum"],
     },
+
+    # ---- Student -> Vice Principal complaint/feedback channel (bypasses
+    # the class-teacher/HOD layer entirely - see app.py's
+    # handle_complaint_feedback()/COMPLAINT_VIEWER_ROLES). Every phrase
+    # here collision-checked via check_phrase_safety() against the full
+    # student role group before being added. ----
+    "complaint_feedback": {
+        "phrases": ["i want to complain", "i have a problem with my teacher",
+                    "i have a complaint about a teacher", "i need to report something about my teacher",
+                    "my teacher is being unfair", "how do i complain",
+                    "feedback about my teacher", "issue with my sir", "issue with my miss",
+                    "issue with my ma'am", "sir is not teaching properly",
+                    "i want to report my teacher", "i want to file a complaint",
+                    "how do i report a teacher", "i want to complain about a teacher",
+                    "complaint against my teacher", "file a teacher complaint",
+                    "i have an issue with a teacher", "my teacher is treating me unfairly",
+                    "i want to tell someone about my teacher", "report teacher behavior",
+                    "teacher is rude to me", "teacher is not fair to me",
+                    "i want to complain about miss", "i want to complain about sir",
+                    "can i complain about a teacher", "i need to complain about a teacher",
+                    "how to file a complaint against a teacher", "my teacher is misbehaving",
+                    "teacher favoritism complaint", "unfair marking by my teacher",
+                    "unfair grading complaint", "i got unfair marks",
+                    "teacher shouting at students", "i have a teacher problem", "complain about miss",
+                    "complain about sir", "file a complaint about teacher", "report a teacher issue",
+                    "i wanna complain about a teacher", "wanna report my teacher",
+                    "somethings wrong with my teacher", "somethin wrong with my teacher",
+                    "mam is not teaching properly", "maam is being unfair",
+                    "i have a teecher complaint", "i cmplain about teacher", "i wana complain",
+                    "need to raise an issue about a teacher", "raise a complaint against my teacher",
+                    "vp complaint about my teacher", "tell vp about my teacher"],
+        "keywords": ["complain", "complaint", "complaints", "complaining", "unfair",
+                     "misbehaving", "misbehavior", "rude"],
+    },
+
+    # ---- Vice-principal-only complaint inbox summary (see app.py's
+    # handle_complaint_summary()/VP_ONLY_INTENTS - deliberately NOT in
+    # ROLE_PERSONAL_INTENTS['hod'], so a plain hod/teacher login can never
+    # be routed here; see app.py's _personal_intents_for_role()). Every
+    # phrase collision-checked against the real vice_principal candidate
+    # list (teacher intents + department intents + this one) before adding. ----
+    "complaint_summary": {
+        "phrases": ["any new complaints", "any new student complaints", "check pending complaints",
+                    "check any pending complaints", "how many complaints", "new complaints today",
+                    "check student complaints", "open the complaints dashboard", "student feedback complaints",
+                    "any unreviewed complaints"],
+        "keywords": ["complaint", "complaints", "pending"],
+    },
 }
 
 

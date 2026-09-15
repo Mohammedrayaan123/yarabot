@@ -418,7 +418,12 @@ const quickActions = {
         { label: "Total Students", msg: "how many students are there" },
         { label: "Total Teachers", msg: "how many teachers do we have" },
         { label: "Class Breakdown", msg: "students per class" },
-    ]
+    ],
+    // Vice-principal only (see app.py's VP_ONLY_INTENTS/complaint_summary) -
+    // hod/teacher/principal deliberately have no complaints entry here.
+    vice_principal: [
+        { label: "Pending Complaints", msg: "check pending complaints" },
+    ],
 };
 
 
@@ -601,6 +606,7 @@ document.addEventListener("DOMContentLoaded", () => {
     killHoldBtn.addEventListener("touchcancel", cancelKillHold);
 
     document.getElementById("notifications-btn").addEventListener("click", handleNotificationsClick);
+    document.getElementById("complaints-notifications-btn").addEventListener("click", handleComplaintsNotificationsClick);
 
     restoreSession();
 });
@@ -685,6 +691,14 @@ function showChatPage(profile) {
     initKillSwitch();
     document.getElementById("notifications-btn").classList.remove("hidden");
     checkNotificationsCount();
+
+    // Vice-principal-only complaints bell - see the HTML comment by
+    // #complaints-notifications-btn. Hidden (and never checked) for
+    // every other role, hod included.
+    const complaintsBtn = document.getElementById("complaints-notifications-btn");
+    complaintsBtn.classList.toggle("hidden", userRole !== "vice_principal");
+    if (userRole === "vice_principal") checkComplaintsNotificationsCount();
+
     document.getElementById("chat-input").focus();
 }
 
@@ -893,6 +907,35 @@ async function handleNotificationsClick() {
     }
     checkNotificationsCount();
     sendQuick("any new announcements");
+}
+
+// Vice-principal-only complaints bell - mirrors checkNotificationsCount()/
+// handleNotificationsClick() exactly, against the complaint-scoped
+// endpoints/last_seen_complaint_id instead of notices.
+async function checkComplaintsNotificationsCount() {
+    try {
+        const res = await fetch("/api/vp/complaints-count");
+        const data = await res.json();
+        const badge = document.getElementById("complaints-badge-count");
+        if (data.count > 0) {
+            badge.textContent = data.count > 9 ? "9+" : String(data.count);
+            badge.classList.remove("hidden");
+        } else {
+            badge.classList.add("hidden");
+        }
+    } catch (e) {
+        // Unreachable - leave whatever badge state was already showing.
+    }
+}
+
+async function handleComplaintsNotificationsClick() {
+    try {
+        await fetch("/api/vp/complaints-seen", { method: "POST" });
+    } catch (e) {
+        // Best-effort - still ask below even if marking seen failed.
+    }
+    checkComplaintsNotificationsCount();
+    sendQuick("check pending complaints");
 }
 
 function openKillModal() {

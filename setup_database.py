@@ -186,6 +186,9 @@ CREATE TABLE IF NOT EXISTS learned_phrases (
 # date_posted <= last-checked-timestamp and silently never surface as
 # unseen. notice_id has no such granularity problem - a clean total order
 # regardless of what day anything happened on.
+# last_seen_complaint_id: same pattern, for the VP-only complaint-review
+# badge (see app.py's /api/vp/complaints-count) - a complaint_id, not a
+# timestamp, for the same reason as last_seen_notice_id above.
 tables["users"] = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -193,7 +196,34 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255),
     role ENUM('student','teacher','hod','vice_principal','assistant_principal','principal','admin'),
     linked_id INT,
-    last_seen_notice_id INT DEFAULT 0
+    last_seen_notice_id INT DEFAULT 0,
+    last_seen_complaint_id INT DEFAULT 0
+)
+"""
+
+# Student -> Vice Principal complaint/feedback channel, deliberately
+# bypassing the class-teacher/HOD layer (see the task this came from) -
+# teacher_id is who the complaint is ABOUT, not who can see it.
+# reviewed_by has no role check at the schema level; app.py's
+# COMPLAINT_VIEWER_ROLES is what actually restricts who can write to it.
+# resolution_notes is the VP's private working notes and is never
+# returned to the student-facing API - enforced in app.py, not here.
+tables["complaints"] = """
+CREATE TABLE IF NOT EXISTS complaints (
+    complaint_id INT PRIMARY KEY AUTO_INCREMENT,
+    student_id INT NOT NULL,
+    teacher_id INT NOT NULL,
+    complaint_text TEXT NOT NULL,
+    category ENUM('teaching_quality','behavior','unfair_grading','communication','other') NOT NULL,
+    anonymous BOOLEAN DEFAULT FALSE,
+    status ENUM('new','under_review','resolved') DEFAULT 'new',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at DATETIME NULL,
+    reviewed_by INT NULL,
+    resolution_notes TEXT NULL,
+    FOREIGN KEY (student_id) REFERENCES students(student_id),
+    FOREIGN KEY (teacher_id) REFERENCES teachers(teacher_id),
+    FOREIGN KEY (reviewed_by) REFERENCES users(user_id)
 )
 """
 
@@ -270,7 +300,7 @@ CREATE TABLE IF NOT EXISTS intent_phrases (
 # go after both. system_logs needs users to already exist (performed_by FK).
 creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "class_teachers",
                    "students", "timetable", "exams", "notes", "notices",
-                   "unanswered_questions", "learned_phrases", "users",
+                   "unanswered_questions", "learned_phrases", "users", "complaints",
                    "system_settings", "system_logs", "tie_break_log", "intent_phrases"]
 
 for table_name in creation_order:
@@ -312,6 +342,19 @@ if cursor.fetchone()[0] == 0:
         FOREIGN KEY (hod_teacher_id) REFERENCES teachers(teacher_id)
     """)
     print("Constraint 'fk_departments_hod_teacher' added.")
+
+# users.last_seen_complaint_id: added after users already shipped on
+# existing databases - CREATE TABLE IF NOT EXISTS above only helps a fresh
+# database, so this is guarded the same way as the FK above, checking
+# information_schema instead since this is a column, not a constraint.
+cursor.execute("""
+    SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'school_bot' AND TABLE_NAME = 'users'
+    AND COLUMN_NAME = 'last_seen_complaint_id'
+""")
+if cursor.fetchone()[0] == 0:
+    cursor.execute("ALTER TABLE users ADD COLUMN last_seen_complaint_id INT DEFAULT 0")
+    print("Column 'users.last_seen_complaint_id' added.")
 
 connection.commit()
 cursor.close()

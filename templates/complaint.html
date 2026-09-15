@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File a Complaint - YaraBot</title>
+    <link rel="icon" href="/static/Yaralogo.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+        :root {
+            --brand: #2E3191;
+            --brand-dark: #1E2070;
+            --brand-tint: #F4F5FF;
+        }
+        body { background: var(--brand-tint); }
+        .focus-brand:focus {
+            outline: 2px solid var(--brand);
+            outline-offset: 0;
+            border-color: transparent;
+        }
+        .btn-brand {
+            background: var(--brand);
+            transition: background 0.15s ease;
+        }
+        .btn-brand:hover { background: var(--brand-dark); }
+        .btn-brand:disabled { opacity: 0.6; cursor: not-allowed; }
+        .status-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: capitalize;
+        }
+        .status-new { background: #FEF3C7; color: #92400E; }
+        .status-under_review { background: #DBEAFE; color: #1E40AF; }
+        .status-resolved { background: #D1FAE5; color: #065F46; }
+    </style>
+</head>
+<body class="min-h-screen">
+
+<div class="max-w-xl mx-auto px-4 py-6 sm:py-10">
+
+    <a href="/" class="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 mb-5">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+        </svg>
+        Back to YaraBot
+    </a>
+
+    <div class="bg-white border border-gray-200 rounded-2xl p-5 sm:p-7 shadow-sm mb-6">
+        <h1 class="text-xl font-bold text-gray-900 mb-1.5">Share Feedback Privately</h1>
+        <p class="text-sm text-gray-600 mb-6">
+            This goes directly to the Vice Principal. No teacher, class teacher, or HOD will see it.
+        </p>
+
+        <div id="form-wrap">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1.5">Which teacher is this about?</label>
+                    <select id="teacher-select" class="focus-brand w-full px-4 py-3 rounded-xl border border-gray-200 text-sm bg-white">
+                        <option value="">Select a teacher…</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                    <div id="category-options" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <!-- injected -->
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1.5">Tell us what happened</label>
+                    <textarea
+                        id="complaint-text"
+                        rows="6"
+                        placeholder="Describe the issue in your own words..."
+                        class="focus-brand w-full px-4 py-3 rounded-xl border border-gray-200 text-sm transition-all resize-none"
+                    ></textarea>
+                    <p class="text-xs text-gray-500 mt-1"><span id="char-count">0</span> / 20 characters minimum</p>
+                </div>
+
+                <label class="flex items-start gap-2.5 cursor-pointer">
+                    <input type="checkbox" id="anonymous-check" class="mt-1 w-4 h-4 rounded border-gray-300 text-[var(--brand)] focus:ring-0">
+                    <span class="text-sm text-gray-700">
+                        Submit anonymously
+                        <span class="block text-xs text-gray-500 mt-0.5">
+                            The VP won't see your name. Anonymous complaints may be harder to follow up on.
+                        </span>
+                    </span>
+                </label>
+
+                <div id="submit-error" class="hidden text-red-600 text-sm bg-red-50 border border-red-100 rounded-lg py-2 px-3"></div>
+
+                <div class="flex items-center justify-between pt-1">
+                    <p class="text-xs text-gray-500"><span id="remaining-count">3</span> of <span id="max-count">3</span> left today</p>
+                    <button
+                        id="submit-btn"
+                        onclick="submitComplaint()"
+                        class="btn-brand text-white font-semibold py-3 px-6 rounded-xl text-sm transition-all active:scale-95"
+                    >
+                        Submit
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="confirmation" class="hidden text-center py-6">
+            <div class="text-4xl mb-3">✅</div>
+            <p class="text-base font-semibold text-gray-900 mb-1">Your feedback has been submitted.</p>
+            <p class="text-sm text-gray-600 mb-5">The Vice Principal will review it privately.</p>
+            <button onclick="resetForm()" class="btn-brand text-white font-semibold py-2.5 px-5 rounded-xl text-sm">
+                Submit another
+            </button>
+        </div>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-2xl p-5 sm:p-7 shadow-sm">
+        <h2 class="text-base font-bold text-gray-900 mb-4">Your Past Complaints</h2>
+        <div id="history-list" class="space-y-3">
+            <p class="text-sm text-gray-500">Loading…</p>
+        </div>
+    </div>
+</div>
+
+<script>
+const CATEGORIES = [
+    { value: "teaching_quality", label: "Teaching Quality" },
+    { value: "behavior", label: "Behavior" },
+    { value: "unfair_grading", label: "Unfair Grading" },
+    { value: "communication", label: "Communication" },
+    { value: "other", label: "Other" },
+];
+
+let remainingToday = 0;
+
+function renderCategories() {
+    const container = document.getElementById("category-options");
+    container.innerHTML = CATEGORIES.map((c, i) => `
+        <label class="flex items-center gap-2 text-sm text-gray-700 border border-gray-200 rounded-xl px-3 py-2.5 cursor-pointer has-[:checked]:border-[var(--brand)] has-[:checked]:bg-[var(--brand-tint)]">
+            <input type="radio" name="category" value="${c.value}" ${i === 0 ? "checked" : ""} class="w-4 h-4 text-[var(--brand)] focus:ring-0">
+            ${c.label}
+        </label>
+    `).join("");
+}
+
+async function loadInit() {
+    try {
+        const res = await fetch("/api/complaint/init");
+        if (res.status === 401) { window.location.href = "/"; return; }
+        const data = await res.json();
+
+        const select = document.getElementById("teacher-select");
+        select.innerHTML = '<option value="">Select a teacher…</option>' + data.teachers.map(t =>
+            `<option value="${t.teacher_id}">${t.name}${t.subject ? " (" + t.subject + ")" : ""}</option>`
+        ).join("");
+
+        remainingToday = data.remaining_today;
+        document.getElementById("remaining-count").textContent = data.remaining_today;
+        document.getElementById("max-count").textContent = data.max_per_day;
+        updateSubmitState();
+    } catch (e) {
+        showError("Couldn't load the form right now. Please try again.");
+    }
+}
+
+function updateSubmitState() {
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = remainingToday <= 0;
+    if (remainingToday <= 0) {
+        btn.textContent = "Daily limit reached";
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    renderCategories();
+    loadInit();
+    loadHistory();
+    document.getElementById("complaint-text").addEventListener("input", (e) => {
+        document.getElementById("char-count").textContent = e.target.value.trim().length;
+    });
+});
+
+function showError(msg) {
+    const el = document.getElementById("submit-error");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+}
+
+function clearError() {
+    document.getElementById("submit-error").classList.add("hidden");
+}
+
+async function submitComplaint() {
+    clearError();
+    const teacherId = document.getElementById("teacher-select").value;
+    const category = document.querySelector('input[name="category"]:checked')?.value;
+    const text = document.getElementById("complaint-text").value.trim();
+    const anonymous = document.getElementById("anonymous-check").checked;
+
+    if (!teacherId) return showError("Please select which teacher this is about.");
+    if (text.length < 20) return showError("Please write at least 20 characters.");
+
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = true;
+
+    try {
+        const res = await fetch("/api/complaint", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ teacher_id: teacherId, category, complaint_text: text, anonymous }),
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showError(data.error || "Something went wrong. Please try again.");
+            updateSubmitState();
+            return;
+        }
+        document.getElementById("form-wrap").classList.add("hidden");
+        document.getElementById("confirmation").classList.remove("hidden");
+        loadHistory();
+    } catch (e) {
+        showError("Couldn't submit right now. Please try again.");
+        updateSubmitState();
+    }
+}
+
+function resetForm() {
+    document.getElementById("complaint-text").value = "";
+    document.getElementById("char-count").textContent = "0";
+    document.getElementById("anonymous-check").checked = false;
+    document.getElementById("teacher-select").value = "";
+    document.getElementById("confirmation").classList.add("hidden");
+    document.getElementById("form-wrap").classList.remove("hidden");
+    loadInit();
+}
+
+async function loadHistory() {
+    try {
+        const res = await fetch("/api/complaint/history");
+        const data = await res.json();
+        const list = document.getElementById("history-list");
+
+        if (!data.complaints || data.complaints.length === 0) {
+            list.innerHTML = '<p class="text-sm text-gray-500">No complaints filed yet.</p>';
+            return;
+        }
+
+        list.innerHTML = data.complaints.map(c => `
+            <div class="border border-gray-200 rounded-xl p-3.5">
+                <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-sm font-semibold text-gray-800">${escapeHtml(c.teacher_name)}</span>
+                    <span class="status-badge status-${c.status}">${c.status.replace("_", " ")}</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-1.5">${escapeHtml(c.category.replace("_", " "))} · ${new Date(c.created_at).toLocaleDateString()}</p>
+                <p class="text-sm text-gray-700">${escapeHtml(c.complaint_text)}</p>
+            </div>
+        `).join("");
+    } catch (e) {
+        document.getElementById("history-list").innerHTML = '<p class="text-sm text-gray-500">Couldn\'t load your history right now.</p>';
+    }
+}
+
+function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+}
+</script>
+</body>
+</html>
