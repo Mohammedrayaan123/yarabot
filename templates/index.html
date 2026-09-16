@@ -65,54 +65,32 @@
                One knob per place the mascot appears. Change the value here
                and every instance of that type resizes. */
             --bot-size-login:   140px;  /* big mascot on the login page   */
-            --bot-size-sidebar:  40px;  /* sidebar header, beside the wordmark */
             --bot-size-chat:     64px;  /* avatar beside each bot message */
 
             /*Chamel3on */
+            /* Wants to hang prominently above the card, the way it did
+               before the header rework removed the sidebar's own
+               wordmark+mascot row (which used to give it that headroom).
+               Restored via the sidebar's own pt-16 (was pt-6, see that
+               div's comment) instead of a bigger negative offset alone -
+               a bigger offset with the OLD pt-6 just re-clips it against
+               #sidebar-scroll's top edge (confirmed via
+               getBoundingClientRect(): -70px/-49px used to put the
+               chameleon's top at -25px to -46px relative to the scroll
+               container, i.e. mostly clipped). -58px on both breakpoints
+               was re-measured against the new pt-16 clearance and lands a
+               few px clear of the clipping edge at both 360px and 1280px. */
             --chameleon-size-sidebar-desktop: 86px;
-            --chameleon-offset-top-desktop: -70px;
+            --chameleon-offset-top-desktop: -58px;
             --chameleon-offset-right-desktop: -26px;
 
             --chameleon-size-sidebar-mobile: 85px;
-            --chameleon-offset-top-mobile: -49px;
+            --chameleon-offset-top-mobile: -58px;
             --chameleon-offset-right-mobile: -26px;
-
-            /* Spider-Man - moved from the greeting's wave emoji to the
-               persistent header bar (mobile hamburger row / desktop
-               sidebar header), so he stays mounted and active for the
-               whole session instead of disappearing once the greeting is
-               hidden. No offset-left vars anymore: horizontal centering is
-               done via left+transform in .spiderman-perch below (fixed
-               math per breakpoint, not a simple offset - see the comment
-               there), not a tunable left-offset. Sizes bumped up from the
-               greeting-anchored version per explicit request - starting
-               points for visual feedback, same as the chameleon.
-
-               --spiderman-perch-height-* is NOT a free tuning knob - it's
-               derived from --spiderman-size-* to match the character's
-               real 16:46 aspect ratio (see SPIDERMAN_VIEWBOX_CROP in
-               app.js: height = size * 46 / 16). Get this out of sync with
-               the crop and "meet" scaling silently pads him with more
-               empty space again - exactly the bug that made him nearly
-               invisible before this crop was corrected: his own on-canvas
-               footprint is a tall, narrow ~10x21 native-unit sliver, not
-               anywhere close to square, so a mismatched box (the old
-               values assumed a 32:53-ish crop) shrinks him far more than
-               the size variable alone suggests. */
-            --spiderman-size-desktop: 64px;
-            --spiderman-perch-height-desktop: 184px;
-            --spiderman-drop-distance-desktop: -10px;
-            --spiderman-offset-top-desktop: -20px;
-
-            --spiderman-size-mobile: 46px;
-            --spiderman-perch-height-mobile: 132px;
-            --spiderman-drop-distance-mobile: 50px;
-            --spiderman-offset-top-mobile: 0px;
         }
 
         /* Mascot containers - sized from the variables above */
         .bot-lottie-login   { width: var(--bot-size-login);   height: var(--bot-size-login); }
-        .bot-lottie-sidebar { width: var(--bot-size-sidebar); height: var(--bot-size-sidebar); }
         .bot-lottie-chat    { width: var(--bot-size-chat);    height: var(--bot-size-chat); }
 
         /* Decorative only: purely visual, carries no information, so it's
@@ -137,61 +115,6 @@
             right: var(--chameleon-offset-right-desktop);
         }
 
-        /* Now that he's centered over the MAIN CHAT AREA (below), he
-           genuinely overlaps the greeting text when dropped - verified
-           live: at the settled frame his box covers the bottom ~7px of
-           "[Name] 👋" itself, not just empty space near it. Positioned
-           siblings with an explicit z-index always paint above normal-flow
-           text regardless of DOM order, so without this the greeting name
-           would render BEHIND him at that overlap - lifting it (and the
-           subtitle, for the same reason, defensively) into their own
-           positioned stacking context with a HIGHER z-index than his (10)
-           is what keeps the text always readable regardless of his
-           animation state. Real CSS stacking rule, not a DOM-order trick -
-           this is the same fix an earlier, greeting-anchored version of
-           Spider-Man needed for the identical reason, removed when he
-           briefly lived in the sidebar (no overlap there) and now needed
-           again after moving him back over the chat content. */
-        #greeting-name, #greeting-sub {
-            position: relative;
-            z-index: 20;
-        }
-
-        /* Spider-Man easter egg - see app.js's spiderman state machine for
-           the drop/retract logic. Anchored to the persistent MAIN CHAT
-           AREA (mounts once, stays active the whole session) instead of
-           the greeting's wave emoji - a direct child of the flex-1 main
-           content wrapper, not the sidebar.
-
-           A previous version of this centered him within the SIDEBAR on
-           desktop (left:144px, half its 288px width) - wrong: the actual
-           ask was "centered over the chat UI", i.e. the main content area,
-           not tucked into the sidebar chrome. Fixed by moving the anchor
-           itself: the main content wrapper is already flex-1 (fills
-           whatever width remains after the sidebar on desktop, the full
-           width on mobile since the sidebar is off-canvas there), so a
-           single left:50% now correctly centers him at BOTH breakpoints -
-           no more fixed-pixel math needed per breakpoint, since the
-           container's own width already adapts. translateX(-50%) (true
-           centering) and translateY(...) (the drop distance) combine in
-           ONE transform declaration - .spiderman-dropped's override below
-           must always restate BOTH parts, not just add translateY alone,
-           or dropping him would also silently uncenter him. */
-        .spiderman-perch {
-            position: absolute;
-            left: 50%;
-            top: var(--spiderman-offset-top-desktop);
-            width: var(--spiderman-size-desktop);
-            height: var(--spiderman-perch-height-desktop);
-            z-index: 10;
-            pointer-events: none;
-            transform: translateX(-50%) translateY(0);
-            transition: transform 0.4s ease-in-out;
-        }
-        .spiderman-perch.spiderman-dropped {
-            transform: translateX(-50%) translateY(var(--spiderman-drop-distance-desktop));
-        }
-
         /* Scrollbar styling */
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -202,18 +125,6 @@
             background: linear-gradient(135deg, #2E3191 0%, #1a1d6e 100%);
             position: relative;      /* anchors the gold star below */
             overflow: hidden;
-        }
-
-        /* Decorative gold star, top-right inside the ID card */
-        .id-card-star {
-            position: absolute;
-            top: 10px;
-            right: 12px;
-            font-size: 20px;
-            line-height: 1;
-            color: var(--brand-gold);
-            opacity: 0.9;
-            pointer-events: none;    /* purely decorative, never eats clicks */
         }
 
         /* Message bubbles */
@@ -253,12 +164,13 @@
             30% { transform: translateY(-5px); opacity: 1; }
         }
 
-        /* Smooth transitions */
+        /* Smooth transitions - chat bubble appear. Subtle: a 4px settle,
+           not a bounce or slide. */
         .fade-in {
-            animation: fadeIn 0.3s ease;
+            animation: fadeIn 0.2s ease;
         }
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(8px); }
+            from { opacity: 0; transform: translateY(4px); }
             to { opacity: 1; transform: translateY(0); }
         }
 
@@ -267,11 +179,50 @@
             scroll-behavior: smooth;
         }
 
-        /* Quick action chip hover */
+        /* Quick action chip hover - background fill + a left accent border
+           that slides in (scaleY, not just a colour swap) rather than the
+           old translateY lift. Needs position:relative + overflow:hidden
+           on the chip itself for the pseudo-element bar to anchor/clip
+           correctly. */
+        .chip {
+            position: relative;
+            overflow: hidden;
+            transition: background 150ms ease, border-color 150ms ease;
+        }
+        .chip::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--brand);
+            transform: scaleY(0);
+            transition: transform 150ms ease;
+        }
         .chip:hover {
             background: var(--brand-tint);
             border-color: var(--brand);
-            transform: translateY(-1px);
+        }
+        .chip:hover::before {
+            transform: scaleY(1);
+        }
+
+        /* Suggestion chips under the greeting - same idea as .chip above,
+           smaller/inline. */
+        .suggestion-chip {
+            border: 1px solid #E5E7EB;
+            border-radius: 6px;
+            font-size: 13px;
+            padding: 6px 12px;
+            background: #fff;
+            color: #374151;
+            cursor: pointer;
+            transition: background 150ms ease, border-color 150ms ease;
+        }
+        .suggestion-chip:hover {
+            background: var(--brand-tint);
+            border-color: var(--brand);
         }
 
         /* Brand-coloured focus ring (replaces Tailwind's focus:ring-blue-500).
@@ -339,7 +290,7 @@
            a `display:none` swap can't be transitioned. `md:hidden` is a hard,
            JS-independent override so it can never appear on desktop. */
         #sidebar-backdrop {
-            transition: opacity 0.3s ease-in-out;
+            transition: opacity 0.2s ease-in-out;
         }
 
         /* ---- Mobile-only fixes (same 768px cutoff as Tailwind's `md:` used
@@ -411,27 +362,6 @@
                 top: var(--chameleon-offset-top-mobile);
                 right: var(--chameleon-offset-right-mobile);
             }
-
-            /* Spider-Man: same independent-per-breakpoint pattern as the
-               chameleon above - overriding the actual properties, not just
-               the desktop variables, so the two breakpoints can't bleed
-               into each other. left:50% (not a fixed px value like
-               desktop's 144px) is correct here specifically because the
-               sidebar is position:fixed/off-canvas on mobile and
-               contributes no width to #chat-page's flex layout - the main
-               content area alone fills it, so 50% of #chat-page's width
-               really is 50% of the visible header row. */
-            .spiderman-perch {
-                /* left:50% no longer needs restating here - it's the base
-                   rule's value now too, since both breakpoints center him
-                   the same way against the main chat area's own width. */
-                top: var(--spiderman-offset-top-mobile);
-                width: var(--spiderman-size-mobile);
-                height: var(--spiderman-perch-height-mobile);
-            }
-            .spiderman-perch.spiderman-dropped {
-                transform: translateX(-50%) translateY(var(--spiderman-drop-distance-mobile));
-            }
         }
 
         /* Real bug fix: replaces Tailwind's `h-screen` (100vh) on body/
@@ -471,38 +401,61 @@
             height: var(--vvh, 100dvh);
         }
 
-        /* ---- Notifications badge - visual only, see the HTML comment by
-           #notifications-btn. Top-LEFT (kill switch is top-right, same
-           z-index tier) so the two fixed corner buttons never overlap at
-           any viewport width. */
-        .notifications-btn {
-            position: fixed;
-            top: 16px;
-            left: 16px;
-            z-index: 50;
+        /* ---- App header - persistent, full-width, same on every
+           breakpoint (mobile AND desktop). Wordmark + mascot on the left,
+           one grouped "pill" of action icons on the right - see
+           #header-icon-pill below. Replaces the old per-icon fixed-
+           position circles floating over the whole viewport. -->
+        #app-header {
+            position: relative;
+            z-index: 20;
+        }
+
+        /* One pill holding every action icon (notifications, VP complaints,
+           report-a-concern, kill switch) instead of scattered floating
+           circles - each icon still gets its own 36px button/touch target
+           inside the shared pill chrome. Light gray-tint pill (not the
+           earlier dark-navy version, which read as an odd, disconnected
+           blob against the rest of this all-white header) with brand-
+           coloured icons for contrast instead of white-on-dark. */
+        #header-icon-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 24px;
+            border: 1px solid #E5E7EB;
+            background: #F9FAFB;
+        }
+        .pill-icon-btn {
+            position: relative;
             width: 36px;
             height: 36px;
             border-radius: 50%;
-            background: #fff;
-            border: 1px solid #E5E7EB;
-            color: #4B5563;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+            border: none;
+            background: transparent;
             cursor: pointer;
-            transition: background 0.15s ease;
+            color: var(--brand);
+            opacity: 0.75;
+            transition: opacity 150ms ease, background 150ms ease;
         }
-        .notifications-btn:hover { background: #F9FAFB; }
-        /* Second bell, vice-principal only (see the HTML comment by
-           #complaints-notifications-btn) - stacked directly below the
-           notices bell, same left offset so neither ever overlaps the
-           opposite-corner kill switch. */
-        .notifications-btn-secondary { top: 60px; }
+        .pill-icon-btn:hover,
+        .pill-icon-btn:focus-visible {
+            opacity: 1;
+            background: var(--brand-tint);
+        }
+        .pill-icon-btn.kill-switch-btn-off {
+            opacity: 0.4;
+            cursor: default;
+            pointer-events: none;
+        }
         .notifications-badge-count {
             position: absolute;
-            top: -4px;
-            right: -4px;
+            top: 2px;
+            right: 2px;
             min-width: 16px;
             height: 16px;
             padding: 0 4px;
@@ -514,44 +467,17 @@
             line-height: 16px;
             text-align: center;
         }
-
-        /* ---- Principal-only kill switch ----
-           Small corner button -> hold-to-confirm modal -> disabled state.
-           Reuses this file's existing conventions: fixed z-index stacking
-           (sidebar 40, mobile header bar 20, sidebar backdrop 30,
-           spiderman 10 - both new layers here sit above all of them),
-           .btn-brand's disabled-opacity pattern, and the sidebar-backdrop's
-           "toggle opacity/pointer-events, not display" technique for
-           anything that should ever transition smoothly (not used here
-           since neither the button nor the modal fades, but kept in mind
-           for consistency - both are shown/hidden via the `hidden` utility
-           instead, since neither needs a transition). */
-        .kill-switch-btn {
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            z-index: 50;
-            width: 36px;
-            height: 36px;
+        /* Small unread DOT (not a count) - the "haven't filed feedback
+           yet" discovery nudge on the report-a-concern icon. */
+        .unread-dot {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
-            background: #DC2626;
-            color: #fff;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border: none;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
-            cursor: pointer;
-            transition: background 0.15s ease;
-        }
-        .kill-switch-btn:hover { background: #B91C1C; }
-        /* Already off - nothing left for this button to do, so it goes
-           inert (grey, unclickable) rather than reopening a modal whose
-           only action is "disable" (there's nothing to disable). */
-        .kill-switch-btn.kill-switch-btn-off {
-            background: #9CA3AF;
-            cursor: default;
-            pointer-events: none;
+            background: var(--brand-gold);
+            border: 1.5px solid #F9FAFB;
         }
 
         .kill-modal-backdrop {
@@ -656,7 +582,7 @@
      time (the other has `hidden`), so axe/screen readers only ever see one
      <main> landmark in the accessibility tree at once - satisfies
      "landmark-one-main" without needing a third wrapper element. -->
-<main id="login-page" class="full-height flex flex-col items-center justify-center px-4" style="background: var(--brand-tint);">
+<main id="login-page" class="{% if logged_in %}hidden {% endif %}full-height flex flex-col items-center justify-center px-4" style="background: var(--brand-tint);">
     <div class="w-full max-w-sm">
         <!-- Logo -->
         <div class="text-center mb-8">
@@ -708,7 +634,7 @@
                     id="login-btn"
                     onclick="handleLogin()"
                     class="btn-brand w-full text-white font-semibold py-3 rounded-xl text-sm
-                           transition-all active:scale-95 mt-2 flex items-center justify-center gap-2"
+                           transition-all duration-100 active:scale-[0.97] mt-2 flex items-center justify-center gap-2"
                 >
                     <span id="login-btn-text">Sign In</span>
                 </button>
@@ -723,68 +649,84 @@
 
 
 <!-- ===================== CHAT PAGE ===================== -->
-<main id="chat-page" class="hidden full-height flex">
+<main id="chat-page" class="{% if not logged_in %}hidden {% endif %}full-height flex flex-col">
     <!-- Visually hidden - the chat page has no visible h1 (the "YaraBot"
          h1 lives on the login page, which is gone by the time this is
          shown), so screen readers had no page-level heading at all here. -->
     <h1 class="sr-only">YaraBot chat</h1>
 
-    <!-- NOTIFICATIONS BADGE - purely visual (see app.js's
-         checkNotificationsCount()), not an NLP feature - the actual
-         notices content comes from the chatbot's "notices" intent
-         (handle_notices() in app.py). Clicking it marks everything seen
-         AND asks the chatbot for the latest notices, reusing the existing
-         quick-action send path instead of building a separate notices
-         panel UI. Visible for every role (unlike the kill switch, which is
-         principal-only) - shown/hidden purely by login state, no role
-         check needed. Opposite corner from the kill switch so the two
-         fixed buttons can never overlap. -->
-    <button
-        id="notifications-btn"
-        class="notifications-btn hidden"
-        aria-label="Notifications"
-    >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
-        </svg>
-        <span id="notifications-badge-count" class="notifications-badge-count hidden">0</span>
-    </button>
+    <!-- APP HEADER - persistent, one row, identical on mobile and desktop
+         (replaces the old mobile-only header bar + the free-floating
+         fixed-position bell/kill-switch circles). Left: hamburger
+         (mobile only) + mascot + wordmark, tight lockup. Right: one
+         grouped pill holding every action icon - see #header-icon-pill in
+         the <style> block above for its light gray-tint + brand-coloured-
+         icon treatment. -->
+    <div id="app-header" class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-gray-100 bg-white flex-shrink-0">
+        <div class="flex items-center gap-2 min-w-0">
+            <button
+                id="hamburger-btn"
+                onclick="openSidebar()"
+                aria-label="Open menu"
+                class="md:hidden w-9 h-9 flex items-center justify-center rounded-lg text-gray-700
+                       hover:bg-gray-100 transition-all flex-shrink-0"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+                </svg>
+            </button>
+            <span class="font-quicksand text-gray-800 text-2xl truncate">YaraBot</span>
+        </div>
 
-    <!-- VICE-PRINCIPAL-ONLY COMPLAINTS BELL - same pattern as the notices
-         bell above (see app.js's checkComplaintsNotificationsCount()), a
-         second stacked instance rather than merging into the notices
-         count, since the two are unrelated data (student complaints vs.
-         school notices) with separate "seen" markers
-         (last_seen_complaint_id vs. last_seen_notice_id). Hidden by
-         default, shown only for role === "vice_principal" (see
-         app.js's showChatPage()) - no other role, including hod, ever
-         sees this. -->
-    <button
-        id="complaints-notifications-btn"
-        class="notifications-btn notifications-btn-secondary hidden"
-        aria-label="Complaint notifications"
-    >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25z" />
-        </svg>
-        <span id="complaints-badge-count" class="notifications-badge-count hidden">0</span>
-    </button>
+        <!-- Grouped action-icon pill. Every icon below is hidden by
+             default and shown per-role by app.js (showChatPage()) - the
+             bell is the only one shown for every logged-in role. -->
+        <div id="header-icon-pill">
+            <!-- Notifications - see app.js's checkNotificationsCount(). Not
+                 an NLP feature - the actual notices content comes from the
+                 chatbot's "notices" intent (handle_notices() in app.py).
+                 Clicking it marks everything seen AND asks the chatbot for
+                 the latest notices, reusing the existing quick-action send
+                 path instead of a separate notices panel UI. -->
+            <button id="notifications-btn" class="pill-icon-btn hidden" aria-label="Notifications">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                </svg>
+                <span id="notifications-badge-count" class="notifications-badge-count hidden">0</span>
+            </button>
 
-    <!-- PRINCIPAL-ONLY KILL SWITCH - button + confirmation modal.
-         position:fixed, so DOM placement doesn't matter for where it
-         renders - lives here (inside #chat-page) purely so it's hidden
-         along with the rest of the chat page pre-login, and shown/hidden
-         by role via app.js's initKillSwitch() once logged in. -->
-    <button
-        id="kill-switch-btn"
-        class="kill-switch-btn hidden"
-        aria-label="Disable YaraBot"
-    >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v8" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M7 5.5a7 7 0 1 0 10 0" />
-        </svg>
-    </button>
+            <!-- STUDENT-ONLY - "Report a Concern", navigates straight to
+                 /complaint (see app.js's showChatPage()/checkComplaintDot()).
+                 The dot is a discovery nudge, shown only while this student
+                 has never filed a complaint (see /api/complaint/history). -->
+            <button id="complaint-report-btn" class="pill-icon-btn hidden" aria-label="Report a concern" onclick="window.location.href='/complaint'">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" />
+                </svg>
+                <span id="complaint-unread-dot" class="unread-dot hidden"></span>
+            </button>
+
+            <!-- VICE-PRINCIPAL-ONLY complaints bell - separate "seen"
+                 marker (last_seen_complaint_id) from the notices bell
+                 above, see app.js's checkComplaintsNotificationsCount().
+                 No other role, including hod, ever sees this. -->
+            <button id="complaints-notifications-btn" class="pill-icon-btn hidden" aria-label="Complaint notifications">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25z" />
+                </svg>
+                <span id="complaints-badge-count" class="notifications-badge-count hidden">0</span>
+            </button>
+
+            <!-- PRINCIPAL-ONLY kill switch - button + confirmation modal
+                 below. Shown/hidden by role via app.js's initKillSwitch(). -->
+            <button id="kill-switch-btn" class="pill-icon-btn hidden" aria-label="Disable YaraBot">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v8" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M7 5.5a7 7 0 1 0 10 0" />
+                </svg>
+            </button>
+        </div>
+    </div>
 
     <div id="kill-modal-backdrop" class="kill-modal-backdrop hidden">
         <div class="kill-modal">
@@ -816,13 +758,19 @@
         </div>
     </div>
 
+    <!-- BODY ROW - sidebar + main chat area side by side, below the
+         persistent #app-header above. A plain flex row; #sidebar's own
+         fixed/static split (mobile overlay vs. desktop permanent column)
+         is unaffected by being nested one level deeper than before. -->
+    <div class="flex flex-1 min-h-0">
+
     <!-- SIDEBAR -->
     <!-- No overflow-y-auto here anymore (moved to #sidebar-scroll below) -
          #sidebar itself needs to stay overflow-visible so nothing inside
          gets clipped by it. -->
     <div id="sidebar" class="fixed md:static inset-y-0 left-0 z-40 w-72 h-full bg-gray-50 border-r border-gray-100
                               flex flex-col flex-shrink-0
-                              -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out">
+                              -translate-x-full md:translate-x-0 transition-transform duration-200 ease-in-out">
 
         <!-- Close button - mobile/tablet only, hidden entirely on desktop since the
              sidebar is permanent there and never needs closing. -->
@@ -844,22 +792,19 @@
              actually scroll instead of growing past its allotted space. -->
         <div id="sidebar-scroll" class="flex-1 min-h-0 overflow-y-auto flex flex-col">
 
-        <!-- School header: Lottie mascot | wordmark. No school logo here
-             (deliberately - kept everywhere else it's used, e.g. the login
-             page, just not this row) - the Quicksand wordmark carries the
-             brand identity on its own at this size. -->
-        <div class="px-5 pt-6 pb-4">
-            <div class="flex items-center gap-2 mb-5">
-                <div id="sidebar-lottie" class="bot-lottie-sidebar flex-shrink-0"></div>
-                <span class="font-quicksand text-gray-800 text-2xl">YaraBot</span>
-            </div>
-
+        <div class="px-5 pt-16 pb-4">
+            <!-- pt-16 (was pt-6): extra headroom for the chameleon to hang
+                 prominently above the card again, same amount of space its
+                 old wordmark-row neighbor used to provide before that row
+                 moved into the persistent header - see the chameleon
+                 offset vars up top for the other half of this fix. -->
             <!-- ID Card wrapper - relatively positioned, no overflow
                  clipping, so #sidebar-chameleon (a SIBLING of #id-card, not
                  a child of it) can perch over the card's top-right corner
                  without being clipped by #id-card's own overflow:hidden
-                 (needed there for the gold star decoration). Same "move
-                 the overflow elsewhere" fix as #sidebar-scroll above -
+                 (needed there so the gradient background respects the
+                 card's rounded corners). Same "move the overflow
+                 elsewhere" fix as #sidebar-scroll above -
                  anchoring the chameleon to #sidebar instead of #id-card
                  directly used to make it drift: #sidebar becomes
                  position:static on desktop (md:static), so an absolutely
@@ -878,10 +823,6 @@
                      information and must never intercept a tap. -->
                 <div id="sidebar-chameleon" class="chameleon-perch chameleon-perch-sidebar" aria-hidden="true"></div>
                 <div id="id-card" class="id-card rounded-2xl p-5 text-white shadow-lg mb-5">
-                    <span class="id-card-star">⭐</span>
-                <div class="text-xs font-semibold tracking-widest uppercase opacity-75 mb-3">
-                    Student ID
-                </div>
                 <div id="card-name" class="text-lg font-bold tracking-tight mb-1">—</div>
                 <div id="card-sub" class="text-xs opacity-80 mb-4">—</div>
                 <div class="flex gap-2" id="card-stats">
@@ -934,61 +875,12 @@
     <div class="flex-1 flex flex-col h-full min-w-0 relative">
 
         <!-- Kill-switch disabled banner - full-width across the top of the
-             chat area, above both the mobile header bar and (on desktop,
-             where that bar is hidden) everything else. Shown for every
-             role, not just the principal - toggled by app.js's
-             applySystemStatus() based on /api/system-status on load and
-             the kill-switch response afterward. -->
+             chat area (below #app-header, above the chat messages/input).
+             Shown for every role, not just the principal - toggled by
+             app.js's applySystemStatus() based on /api/system-status on
+             load and the kill-switch response afterward. -->
         <div id="disabled-banner" class="hidden bg-red-50 border-b border-red-200 text-red-700 text-xs sm:text-sm text-center py-2 px-4 flex-shrink-0 relative z-20">
             YaraBot is temporarily unavailable. Please contact the school administration.
-        </div>
-
-        <!-- Spider-Man easter egg - persistent for the whole session
-             (mounted once by showChatPage(), never torn down until
-             logout/session expiry - see app.js). Anchored here, to the
-             MAIN CHAT AREA (not #chat-page as a whole, and not the
-             sidebar) - centered over the chat content itself, roughly
-             above the greeting, the same "top of the chat UI" position he
-             occupied before this move, just now persistent instead of
-             tied to the greeting. This wrapper is already flex-1 (fills
-             whatever width remains after the sidebar on desktop, the full
-             width on mobile since the sidebar is off-canvas there), so
-             left:50%+translateX(-50%) centers correctly at BOTH
-             breakpoints without needing separate fixed-pixel math per
-             breakpoint - unlike the sidebar, this container's own width
-             already adapts. Made position:relative specifically so this
-             can be positioned against it directly. -->
-        <div id="spiderman-lottie" class="spiderman-perch" aria-hidden="true"></div>
-
-        <!-- Mobile/tablet-only header bar: hamburger opens the sidebar.
-             Hidden entirely on desktop (md:hidden) since the sidebar is
-             already always visible there. mobile-header-bar id + z-index:
-             real bug found live - Spider-Man sits ABOVE this in DOM order
-             (so he can be the first child of the shared main-chat-area
-             wrapper, see the comment above), and being position:absolute
-             with an explicit z-index, he was painting IN FRONT of this
-             bar's white background wherever they overlap near the top -
-             looked like he and his web were floating above/in front of
-             the header rather than hanging down from behind it, which
-             reads as fake/unrealistic (a real spider would be occluded by
-             whatever it's anchored behind). Lifting this bar into its own
-             positioned stacking context with a HIGHER z-index than his
-             (10) fixes it the same way the greeting text is protected
-             above - he now genuinely renders behind this bar, only
-             visible in the open chat area below it. -->
-        <div id="mobile-header-bar" class="md:hidden flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-white flex-shrink-0 relative z-20">
-            <button
-                id="hamburger-btn"
-                onclick="openSidebar()"
-                aria-label="Open menu"
-                class="w-11 h-11 flex items-center justify-center rounded-lg text-gray-700
-                       hover:bg-gray-100 transition-all flex-shrink-0"
-            >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
-                </svg>
-            </button>
-            <span class="font-quicksand text-gray-800 text-sm">YaraBot</span>
         </div>
 
         <!-- Chat messages -->
@@ -1011,9 +903,13 @@
 
             <!-- Greeting (shown before first message) -->
             <div id="greeting" class="flex flex-col items-center justify-center h-full text-center pb-20">
-                <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2"></div>
-                <h2 id="greeting-name" class="font-playfair text-4xl font-bold text-gray-900 tracking-tight mb-2"></h2>
-                <p id="greeting-sub" class="text-base text-gray-500"></p>
+                <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2" style="letter-spacing:1px;"></div>
+                <h2 id="greeting-name" class="font-playfair text-[28px] font-bold text-gray-900 tracking-tight mb-2"></h2>
+                <p id="greeting-sub" class="text-[15px] text-gray-500 mb-4"></p>
+                <!-- Suggestion chips - same data as the sidebar's Quick
+                     Actions (see app.js's renderGreeting()), rendered
+                     inline here too as a second discovery path. -->
+                <div id="greeting-chips" class="flex flex-wrap items-center justify-center gap-2 max-w-xs"></div>
             </div>
         </div>
 
@@ -1040,7 +936,7 @@
                     onclick="sendMessage()"
                     aria-label="Send message"
                     class="btn-brand w-11 h-11 rounded-xl flex items-center
-                           justify-center flex-shrink-0 transition-all active:scale-90"
+                           justify-center flex-shrink-0 transition-all duration-100 active:scale-[0.97]"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" class="w-4 h-4">
                         <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
@@ -1052,6 +948,7 @@
                 is an AI which can make mistakes, Double check answers.
             </p>
         </div>
+    </div>
     </div>
 </main>
 

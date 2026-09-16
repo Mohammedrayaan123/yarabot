@@ -50,268 +50,8 @@ const LOTTIE_VIEWBOX_CROPS = {
     [BOT_LOTTIE_URL]: "45 73 400 400",
 };
 
-// =========================================================
-// SPIDER-MAN EASTER EGG
-// Anchored to the persistent main chat area (#spiderman-lottie in
-// index.html, a direct child of the flex-1 main-content wrapper, not the
-// sidebar). Mounts once per session in showChatPage() and stays active the
-// whole session, including after messages are sent - only torn down by
-// handleSessionExpired()/handleLogout(), never sendMessage()/clearChat().
-// See initSpiderman()/teardownSpiderman() below for the lifecycle.
-// =========================================================
-const SPIDERMAN_LOTTIE_URL = "/static/animation_spider.json";
-
-// The old crop ("0 -21 32 53") used the full native 0-32 canvas width,
-// leaving the character at ~30% of the container's width - a tiny speck
-// padded by empty crop space, not a DOM bug (mount/opacity/z-index were
-// fine). Re-measured via the SVG transform matrix on the character's <g>
-// across every frame: scale (0.0302) and X (10.92) are identical at every
-// frame - he only moves vertically. Real footprint on the 336x695 native
-// asset: width ~10.15 (x: 10.92-21.08), height ~21 (y: -21 to 21). "8 -23
-// 16 46" crops tightly to that. --spiderman-perch-height-* in index.html
-// was recomputed to match this crop's 16:46 aspect ratio too - the old
-// height assumed 32:53, which let "meet" scaling add more letterboxing.
-const SPIDERMAN_VIEWBOX_CROP = "8 -23 16 46";
-
-// Frame ranges, measured from the rendered animation: 0-6 fade in, 6-24 a
-// settle wobble, 24-32 the actual drop (y: 0 -> -21). 32-62.33 (the rest
-// of the file) is a dead hold - every layer's position/opacity is
-// byte-identical at frames 32/40/50/62, no baked-in "spring back up"
-// sequence exists. So "retract" plays the drop segment in reverse
-// (playSegments([end, start], true)) - the only way to get a retraction
-// out of a file that only ever animates downward.
-const SPIDERMAN_DROP_SEGMENT = [0, 32];
-const SPIDERMAN_LOWEST_FRAME = 32;
-const SPIDERMAN_RETRACTED_FRAME = 0;
-
-const SPIDERMAN_IDLE_MS = 30000;       // no typing for this long after he drops -> auto-retract
-const SPIDERMAN_REDROP_DELAY_MS = 5000; // after an idle-triggered retract, wait this long before re-checking
-
-let spidermanAnim = null;
-let spidermanIdleTimer = null;
-let spidermanRedropTimer = null;
-let spidermanInputTarget = null;   // the actual <textarea> the listener is attached to, for clean removal
-let spidermanInputListener = null;
-// True from initSpiderman() start until teardownSpiderman() - guards a
-// race where loadLottieData() (async) hasn't resolved yet and
-// showChatPage() runs again (e.g. session-expiry-then-relogin), which
-// would otherwise start a second concurrent mount. Checked synchronously
-// before the fetch even starts; spidermanGeneration below only covers the
-// async callback itself.
-let spidermanMountStarted = false;
-// Bumped by both init and teardown - covers a second race: a genuine
-// teardown while an initSpiderman() fetch is still in flight would
-// otherwise let that mount finish and leave a live instance ticking after
-// the session ended. Each async callback captures the generation at call
-// time and bails if it no longer matches.
-let spidermanGeneration = 0;
 // Kept so clearChat() can rebuild the greeting the same way showChatPage() does.
 let currentProfile = null;
-
-// Without explicit state, retractSpiderman() couldn't tell "already
-// retracted" from "currently hanging" and called playSegments()
-// unconditionally on every 'input' event - forceFlag:true snaps back to
-// the segment start first, so every keystroke replayed the whole retract.
-//   'idle'      - nothing mounted/dropped yet
-//   'dropped'   - hanging at the settled frame, idle timer running
-//   'retracted' - pulled back up/out of view, nothing animating
-let spidermanState = "idle";
-
-/** Cancel both Spider-Man timers without touching the animation itself. */
-function clearSpidermanTimers() {
-    if (spidermanIdleTimer) { clearTimeout(spidermanIdleTimer); spidermanIdleTimer = null; }
-    if (spidermanRedropTimer) { clearTimeout(spidermanRedropTimer); spidermanRedropTimer = null; }
-}
-
-/**
- * Full teardown: cancels timers, detaches the input listener, destroys
- * the Lottie instance. Real boundary is a session end -
- * handleSessionExpired()/handleLogout() - since #spiderman-lottie is
- * persistent and survives sendMessage()/clearChat(). Resetting
- * spidermanMountStarted (not just spidermanAnim) allows a legitimate
- * fresh mount if the user logs back in without a full page reload.
- */
-function teardownSpiderman() {
-    spidermanGeneration++;   // invalidates any in-flight initSpiderman() mount
-    spidermanMountStarted = false;
-    spidermanState = "idle";
-    clearSpidermanTimers();
-    if (spidermanInputTarget && spidermanInputListener) {
-        spidermanInputTarget.removeEventListener("input", spidermanInputListener);
-    }
-    spidermanInputTarget = null;
-    spidermanInputListener = null;
-    if (spidermanAnim) {
-        spidermanAnim.destroy();
-        spidermanAnim = null;
-    }
-    // Container persists in the DOM across the session, so a later fresh
-    // mount could otherwise start from a stale "dropped" class.
-    const container = document.getElementById("spiderman-lottie");
-    if (container) container.classList.remove("spiderman-dropped");
-}
-
-function armSpidermanIdleTimer() {
-    if (spidermanIdleTimer) clearTimeout(spidermanIdleTimer);
-    spidermanIdleTimer = setTimeout(() => {
-        spidermanIdleTimer = null;
-        retractSpiderman(true);   // idle-triggered - eligible for the 5s re-drop check
-    }, SPIDERMAN_IDLE_MS);
-}
-
-function dropSpiderman() {
-    if (!spidermanAnim) return;
-    if (spidermanState === "dropped") return;   // already hanging - nothing to do
-    spidermanState = "dropped";
-    // The Lottie file's own keyframed motion only moves the character
-    // ~25px - the real travel distance is this CSS class toggle (see
-    // .spiderman-perch.spiderman-dropped in index.html); playSegments()
-    // below just layers his small settle motion on top of it.
-    const container = document.getElementById("spiderman-lottie");
-    if (container) container.classList.add("spiderman-dropped");
-    spidermanAnim.playSegments(SPIDERMAN_DROP_SEGMENT, true);
-    armSpidermanIdleTimer();
-}
-
-/**
- * @param fromIdleTimeout - true only when the 30s idle timer itself fired.
- * Typing (the 'input' listener) always calls this with false: it should
- * retract him ONCE and stay retracted while the user keeps typing, never
- * queue a re-drop.
- */
-function retractSpiderman(fromIdleTimeout) {
-    if (!spidermanAnim) return;
-    // Any retraction cancels whatever's pending, including a re-drop
-    // queued by an earlier idle timeout - so typing during that 5s window
-    // correctly cancels the re-drop. No-op if nothing's armed.
-    if (spidermanIdleTimer) { clearTimeout(spidermanIdleTimer); spidermanIdleTimer = null; }
-    if (spidermanRedropTimer) { clearTimeout(spidermanRedropTimer); spidermanRedropTimer = null; }
-
-    // Only fires on the transition INTO "retracted" - every keystroke
-    // after the first is a no-op instead of replaying the animation.
-    if (spidermanState !== "retracted") {
-        spidermanState = "retracted";
-        const container = document.getElementById("spiderman-lottie");
-        if (container) container.classList.remove("spiderman-dropped");
-        spidermanAnim.playSegments([SPIDERMAN_LOWEST_FRAME, SPIDERMAN_RETRACTED_FRAME], true);
-    }
-
-    if (fromIdleTimeout) {
-        spidermanRedropTimer = setTimeout(() => {
-            spidermanRedropTimer = null;
-            const input = document.getElementById("chat-input");
-            if (input && input.value.trim() === "") {
-                dropSpiderman();
-            }
-        }, SPIDERMAN_REDROP_DELAY_MS);
-    }
-}
-
-/**
- * Mounts the animation into the persistent #spiderman-lottie header-bar
- * element and starts the drop -> idle -> retract state machine. Called
- * once per session from showChatPage(). Mount-once, not "tear down and
- * rebuild on every call" like the old greeting-anchored version - the
- * spidermanMountStarted guard below makes a second call in the same
- * session (session-expiry-then-relogin without a full reload) a no-op
- * rather than restarting an already-running instance.
- */
-function initSpiderman() {
-    // Synchronous guard, checked BEFORE the async fetch even starts - see
-    // the spidermanMountStarted declaration above for why this is a
-    // separate check from the generation counter below.
-    if (spidermanMountStarted) return;
-    spidermanMountStarted = true;
-    const myGeneration = spidermanGeneration;
-
-    const container = document.getElementById("spiderman-lottie");
-    const input = document.getElementById("chat-input");
-    if (!container || !input || typeof lottie === "undefined") {
-        spidermanMountStarted = false;   // never actually started - allow a real retry later
-        return;
-    }
-
-    loadLottieData(SPIDERMAN_LOTTIE_URL).then(data => {
-        // A teardown may have run while this fetch was in flight - bail if
-        // stale (container.isConnected as a second, independent check).
-        if (!data || myGeneration !== spidermanGeneration || !container.isConnected) return;
-
-        // The raw file needs three things filtered before mounting, all
-        // found by direct measurement: a static white background plate (a
-        // "solid" layer, ty:1), and a full duplicate of the character
-        // stacked as [outline, matte, image]. The two image assets
-        // ("vmN1QaQglt" real/animated, "6FjzSH3h6q" duplicate) are
-        // byte-identical (MD5-confirmed) - the duplicate sits permanently
-        // fixed at [11,-21] the whole animation. Removing just the
-        // duplicate image + its matte (the layer immediately above it,
-        // td:1) still left a third layer one position further back: a
-        // black-stroked outline with no refId, also fixed at [11,-21] -
-        // rendered as a disconnected outline hovering above the real
-        // character. All three must go; the real character's own paired
-        // outline stays.
-        //
-        // Filtered here rather than hidden in the rendered SVG after, so
-        // it can't break if lottie-web's DOM structure ever changes. The
-        // cache holds the original fetched data (shared across anyone
-        // loading this URL), so build a filtered copy instead of mutating
-        // it in place.
-        const STUCK_DUPLICATE_REFID = "6FjzSH3h6q";
-        const rawLayers = data.layers || [];
-        const duplicateIdx = rawLayers.findIndex(l => l.refId === STUCK_DUPLICATE_REFID);
-        // Track mattes aren't referenced by ID - the source is always the
-        // layer immediately above its consumer, marked td:1.
-        const duplicateMatteIdx = (duplicateIdx > 0 && rawLayers[duplicateIdx - 1].td === 1)
-            ? duplicateIdx - 1 : -1;
-        // The outline sits one more position back - not a matte (no
-        // td/tt), just a third layer with the same constant [11,-21]
-        // position signature as the duplicate image.
-        const duplicateOutlineIdx = (duplicateMatteIdx > 0) ? duplicateMatteIdx - 1 : -1;
-        const filteredData = {
-            ...data,
-            layers: rawLayers.filter((l, i) =>
-                l.ty !== 1 && i !== duplicateIdx && i !== duplicateMatteIdx && i !== duplicateOutlineIdx)
-        };
-
-        spidermanAnim = lottie.loadAnimation({
-            container,
-            renderer: "svg",
-            loop: false,
-            autoplay: false,
-            animationData: filteredData,
-            rendererSettings: { preserveAspectRatio: "xMidYMid meet" }
-        });
-
-        spidermanAnim.addEventListener("DOMLoaded", () => {
-            // Same staleness guard as above - a teardown can still land in
-            // the (very short) window between lottie.loadAnimation() and
-            // this event firing.
-            if (myGeneration !== spidermanGeneration) return;
-            const svg = container.querySelector("svg");
-            if (!svg) return;
-            svg.setAttribute("viewBox", SPIDERMAN_VIEWBOX_CROP);
-            // lottie-web's SVG renderer also applies its own clip-path,
-            // sized to the native 0,0-32,32 canvas, independent of the
-            // viewBox above - the character sits at y:-21 (above y:0), so
-            // it was clipped invisible before the viewBox crop could even
-            // show it (confirmed: getBoundingClientRect() at frame 32 came
-            // back all zeros). Widen the clipPath rect to match
-            // SPIDERMAN_VIEWBOX_CROP rather than removing it, so real
-            // out-of-bounds content still clips correctly.
-            const clipRect = svg.querySelector("clipPath rect");
-            if (clipRect) {
-                clipRect.setAttribute("x", "8");
-                clipRect.setAttribute("y", "-23");
-                clipRect.setAttribute("width", "16");
-                clipRect.setAttribute("height", "46");
-            }
-            dropSpiderman();
-        });
-
-        spidermanInputListener = () => retractSpiderman(false);
-        spidermanInputTarget = input;
-        input.addEventListener("input", spidermanInputListener);
-    });
-}
 
 function loadLottieData(url) {
     if (_lottieDataCache[url]) return Promise.resolve(_lottieDataCache[url]);
@@ -391,23 +131,16 @@ function cleanupDetachedLottie() {
     });
 }
 
-const subGreetings = [
-    "What would you like to know today?",
-    "How can I help you today?",
-    "Ready to help — just ask!",
-    "Your school assistant is here.",
-    "Got questions? I've got answers.",
-    "Ask me anything about your school info.",
-    "What's on your mind?",
-    "Here to make school life easier.",
-];
-
+// href-based entries (e.g. "Report a Concern") navigate instead of sending
+// a chat message - see buildQuickActions()/renderGreeting()'s rendering
+// branch below, which checks for action.href vs. action.msg.
 const quickActions = {
     student: [
         { label: "My Attendance",  msg: "what is my attendance" },
         { label: "Upcoming Exams", msg: "when are my exams" },
         { label: "My Timetable",   msg: "show me my timetable" },
         { label: "Fee Status",     msg: "what is my fee status" },
+        { label: "Report a Concern", href: "/complaint" },
     ],
     teacher: [
         { label: "My Schedule",    msg: "show me my timetable" },
@@ -612,8 +345,22 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // The session cookie survives a page refresh on its own - the frontend just
-// needs to check for it and skip straight to the chat page instead of
-// always showing the login screen first.
+// needs to check for it and populate the real profile instead of always
+// showing the login screen first.
+//
+// index.html itself already decides which page starts VISIBLE, server-side
+// (Jinja's {% if logged_in %} on #login-page/#chat-page - see app.py's
+// index() route) - that's what actually kills the login-screen flash when
+// navigating back from another page like /complaint, since it's decided
+// before any JS runs at all. This fetch's job is narrower: fill in the
+// real profile data (name, class, attendance...) that the session cookie
+// alone doesn't carry, and correct the rare case where the server's
+// render-time guess (cookie existed) and this fetch's answer (cookie
+// still valid right now) disagree - either a session that expired in the
+// split second between render and fetch, or the reverse: this page was
+// server-rendered as the login screen but the session is in fact fine
+// (shouldn't happen given both read the same cookie, but corrected
+// defensively rather than trusting only one side).
 async function restoreSession() {
     try {
         const res = await fetch("/api/me");
@@ -621,37 +368,52 @@ async function restoreSession() {
         if (data.logged_in) {
             userRole = data.role;
             showChatPage(data.profile);
+        } else {
+            showLoginPage();
         }
     } catch (e) {
-        // Not logged in, or server unreachable - stay on the login page.
+        // Server unreachable - if the server-rendered guess was "logged
+        // in", leave that guess in place rather than bouncing to login on
+        // a transient network blip.
     }
+}
+
+/** The explicit "auth genuinely failed" path - only ever shows the login
+ * form here or in handleSessionExpired(), never as index.html's default
+ * render state (see restoreSession()'s comment above). */
+function showLoginPage() {
+    document.getElementById("chat-page").classList.add("hidden");
+    document.getElementById("chat-page").classList.remove("flex");
+    document.getElementById("login-page").classList.remove("hidden");
 }
 
 
 /**
- * Renders the greeting block's text content (time/name/sub). Called both
- * from showChatPage() (first render) and clearChat() (the greeting
- * reappears after a wipe) so the two never drift out of sync.
- *
- * No longer builds a Spider-Man anchor here - he moved to the persistent
- * header bar (see app.js's SPIDER-MAN EASTER EGG section and
- * #spiderman-lottie in index.html), a static element outside the greeting
- * that clearChat() never touches, so nothing about his lifecycle depends
- * on this function anymore.
+ * Renders the greeting block's text content (time/name/sub) plus the
+ * inline suggestion chips below it. Called both from showChatPage() (first
+ * render) and clearChat() (the greeting reappears after a wipe) so the two
+ * never drift out of sync.
  */
 function renderGreeting(profile) {
     const hour = new Date().getHours();
     const timeGreeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
     const firstName = profile.name.split(" ")[0];
-    const sub = subGreetings[Math.floor(Math.random() * subGreetings.length)];
 
     document.getElementById("greeting-time").textContent = timeGreeting;
-    document.getElementById("greeting-name").textContent = `${firstName} 👋`;
+    document.getElementById("greeting-name").textContent = firstName;
+    document.getElementById("greeting-sub").textContent = "How can I help you today?";
 
-    // Nova's introduction prefixed onto the existing rotating sub-greeting -
-    // this is the first thing the assistant "says" before any chat happens.
-    // Purely a text change: subGreetings itself is untouched.
-    document.getElementById("greeting-sub").textContent = `Hi, I'm Nova! ${sub}`;
+    // Suggestion chips reuse the exact same per-role data as the sidebar's
+    // Quick Actions (quickActions[userRole]) - a second, inline discovery
+    // path for the same actions, not a separate hardcoded list to keep in
+    // sync. href-based actions (e.g. "Report a Concern") navigate instead
+    // of sending a chat message - see buildQuickActions() below.
+    const chipsContainer = document.getElementById("greeting-chips");
+    const actions = quickActions[userRole] || [];
+    chipsContainer.innerHTML = actions.map(action => action.href
+        ? `<a href="${action.href}" class="suggestion-chip">${action.label}</a>`
+        : `<button onclick="sendQuick('${action.msg}')" class="suggestion-chip">${action.label}</button>`
+    ).join("");
 }
 
 
@@ -666,15 +428,11 @@ function showChatPage(profile) {
     document.getElementById("login-page").classList.add("hidden");
     document.getElementById("chat-page").classList.remove("hidden");
     document.getElementById("chat-page").classList.add("flex");
-
-    // Sidebar mascot - mounted here rather than on DOMContentLoaded because
-    // the sidebar lives inside #chat-page, which is display:none until now.
-    const sidebarLottie = document.getElementById("sidebar-lottie");
-    if (sidebarLottie && !sidebarLottie.hasChildNodes()) {
-        mountBotLottie(sidebarLottie);
-    }
-    // Decorative chameleon, perched on the sidebar's top edge - same
-    // "mount once" guard as the sidebar mascot above.
+    // Decorative chameleon, perched on the sidebar's top edge - mounted
+    // here rather than on DOMContentLoaded because the sidebar lives
+    // inside #chat-page, which is display:none until now. Guarded so a
+    // second showChatPage() call (e.g. session-expiry-then-relogin) never
+    // mounts a duplicate instance.
     const sidebarChameleon = document.getElementById("sidebar-chameleon");
     if (sidebarChameleon && !sidebarChameleon.hasChildNodes()) {
         mountBotLottie(sidebarChameleon, CHAMELEON_LOTTIE_URL);
@@ -682,9 +440,6 @@ function showChatPage(profile) {
 
     currentProfile = profile;
     renderGreeting(profile);
-
-    // No-op if already mounted this session (see initSpiderman()).
-    initSpiderman();
 
     buildIDCard(profile);
     buildQuickActions();
@@ -698,6 +453,13 @@ function showChatPage(profile) {
     const complaintsBtn = document.getElementById("complaints-notifications-btn");
     complaintsBtn.classList.toggle("hidden", userRole !== "vice_principal");
     if (userRole === "vice_principal") checkComplaintsNotificationsCount();
+
+    // Student-only "Report a Concern" icon (see the HTML comment by
+    // #complaint-report-btn) - navigates to /complaint, with a discovery
+    // dot while this student has never filed one.
+    const reportBtn = document.getElementById("complaint-report-btn");
+    reportBtn.classList.toggle("hidden", userRole !== "student");
+    if (userRole === "student") checkComplaintDot();
 
     document.getElementById("chat-input").focus();
 }
@@ -756,8 +518,6 @@ function buildIDCard(profile) {
             </div>
         `;
 
-        document.querySelector("#id-card .text-xs").textContent = "Student ID";
-
     } else if (userRole === "teacher") {
         nameEl.textContent = profile.name;
         subEl.textContent  = `${profile.subject} Teacher`;
@@ -767,7 +527,6 @@ function buildIDCard(profile) {
                 <div class="text-xs opacity-75 uppercase tracking-wide">Faculty</div>
             </div>
         `;
-        document.querySelector("#id-card .text-xs").textContent = "Teacher ID";
 
     } else if (userRole === "hod" || userRole === "vice_principal") {
         // hod/vice_principal log in as a teacher record (see app.py's
@@ -782,7 +541,6 @@ function buildIDCard(profile) {
                 <div class="text-xs opacity-75 uppercase tracking-wide">${roleLabel}</div>
             </div>
         `;
-        document.querySelector("#id-card .text-xs").textContent = roleLabel;
 
     } else {
         // principal, assistant_principal - app.py's _build_profile()
@@ -796,7 +554,6 @@ function buildIDCard(profile) {
                 <div class="text-xs opacity-75 uppercase tracking-wide">Admin</div>
             </div>
         `;
-        document.querySelector("#id-card .text-xs").textContent = profile.name;
     }
 }
 
@@ -810,16 +567,17 @@ function buildQuickActions() {
     // buttons rendered with zero padding despite the class being in the
     // DOM). Fixed by using px-4/py-3, already used elsewhere in the static
     // HTML. Keep this in mind for any new class added only in JS-built markup.
-    container.innerHTML = actions.map(action => `
-        <button
-            onclick="sendQuick('${action.msg}')"
-            class="chip w-full text-left text-sm text-gray-700 bg-white border border-gray-200
+    const chipClasses = `chip w-full text-left text-sm text-gray-700 bg-white border border-gray-200
                    rounded-xl px-4 py-3
-                   transition-all duration-150 font-medium"
-        >
-            ${action.label}
-        </button>
-    `).join("");
+                   transition-all duration-150 font-medium`;
+
+    // href-based actions (e.g. "Report a Concern") navigate to a real page
+    // instead of sending a chat message - rendered as an <a>, not a
+    // <button onclick="sendQuick(...)">.
+    container.innerHTML = actions.map(action => action.href
+        ? `<a href="${action.href}" class="${chipClasses} block">${action.label}</a>`
+        : `<button onclick="sendQuick('${action.msg}')" class="${chipClasses}">${action.label}</button>`
+    ).join("");
 }
 
 
@@ -938,6 +696,22 @@ async function handleComplaintsNotificationsClick() {
     sendQuick("check pending complaints");
 }
 
+// Student-only discovery dot on the header's "Report a Concern" icon -
+// shown while this student has never filed a single complaint. Reuses the
+// existing /api/complaint/history endpoint (already built for the
+// complaint page's own history list) rather than adding a new one just
+// for this count.
+async function checkComplaintDot() {
+    try {
+        const res = await fetch("/api/complaint/history");
+        const data = await res.json();
+        const dot = document.getElementById("complaint-unread-dot");
+        dot.classList.toggle("hidden", (data.complaints || []).length > 0);
+    } catch (e) {
+        // Unreachable - leave whatever dot state was already showing.
+    }
+}
+
 function openKillModal() {
     if (!chatbotEnabled) return; // already off - button is inert, but belt and suspenders
     document.getElementById("kill-modal-warning").classList.remove("hidden");
@@ -1026,18 +800,12 @@ function handleSessionExpired() {
 
     removeTypingBubble();
     clearChat();
-    // This IS the real Spider-Man teardown boundary now - #chat-page gets
-    // hidden right below, so without this his idle/re-drop timers would
-    // keep firing indefinitely against a header bar nobody can see.
-    teardownSpiderman();
     userRole = null;
     currentProfile = null;
 
-    document.getElementById("chat-page").classList.add("hidden");
-    document.getElementById("chat-page").classList.remove("flex");
-    // Same login screen shown on initial page load / a failed restoreSession()
-    // - no separate "expired" UI to build or keep in sync with it.
-    document.getElementById("login-page").classList.remove("hidden");
+    // Same login screen shown on a failed restoreSession() - no separate
+    // "expired" UI to build or keep in sync with it.
+    showLoginPage();
 
     const errorEl = document.getElementById("login-error");
     errorEl.textContent = "Your session has expired, please log in again.";
@@ -1064,10 +832,6 @@ async function sendMessage() {
 
     if (messageCount === 0) {
         document.getElementById("greeting").style.display = "none";
-        // Spider-Man deliberately isn't torn down here - he lives in the
-        // persistent main chat area (#spiderman-lottie), not nested inside
-        // the greeting, and keeps running for the whole session. See the
-        // SPIDER-MAN EASTER EGG section above for the real teardown boundary.
     }
     messageCount++;
 
@@ -1305,16 +1069,15 @@ function removeTypingBubble() {
 function clearChat() {
     messageCount = 0;
 
-    // No Spider-Man teardown here anymore - #spiderman-lottie lives outside
-    // #chat-messages (a sibling in the main chat area, not inside it), so
-    // this innerHTML replacement never touches it, and he's meant to keep
-    // running undisturbed through a "Clear Chat" click.
+    // Rebuilds the exact same greeting markup as templates/index.html's
+    // static copy - keep both in sync if this ever changes.
     const container = document.getElementById("chat-messages");
     container.innerHTML = `
         <div id="greeting" class="flex flex-col items-center justify-center h-full text-center pb-20">
-            <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2"></div>
-            <h2 id="greeting-name" class="font-playfair text-4xl font-bold text-gray-900 tracking-tight mb-2"></h2>
-            <p id="greeting-sub" class="text-base text-gray-500"></p>
+            <div id="greeting-time" class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2" style="letter-spacing:1px;"></div>
+            <h2 id="greeting-name" class="font-playfair text-[28px] font-bold text-gray-900 tracking-tight mb-2"></h2>
+            <p id="greeting-sub" class="text-[15px] text-gray-500 mb-4"></p>
+            <div id="greeting-chips" class="flex flex-wrap items-center justify-center gap-2 max-w-xs"></div>
         </div>
     `;
     // Wiping innerHTML detaches every message avatar, so destroy their
@@ -1342,11 +1105,6 @@ function clearChat() {
 // LOGOUT
 // =========================================================
 async function handleLogout() {
-    // The full page reload below wipes everything regardless, but tear
-    // down explicitly first anyway - the fetch is a real network round
-    // trip, and this closes the (small) window where the timers could
-    // otherwise keep ticking if the reload were ever delayed or interrupted.
-    teardownSpiderman();
     await fetch("/api/logout", { method: "POST" });
     location.reload();
 }
