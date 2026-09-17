@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File a Complaint - YaraBot</title>
     <link rel="icon" href="/static/Yaralogo.png">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- defer: #page-loader below is plain CSS with no Tailwind classes,
+         specifically so it paints before this CDN fetch (or the
+         /api/complaint/init call) has any chance to finish - see
+         templates/index.html's matching comment for the full reasoning. -->
+    <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -48,9 +52,61 @@
             from { opacity: 0; transform: scale(0.85); }
             to { opacity: 1; transform: scale(1); }
         }
+
+        /* ---- PAGE LOADER - see templates/index.html's matching comment
+           for why this is plain CSS with no Tailwind dependency. Matches
+           this page's own background (--brand-tint) rather than white,
+           since (unlike index.html) there's only one real destination
+           here to match. ---- */
+        #page-loader {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            background: var(--brand-tint);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .loading-dots { display: flex; gap: 5px; }
+        .loading-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--brand);
+            opacity: 0.3;
+            animation: loadingPulse 1.2s ease-in-out infinite;
+        }
+        .loading-dot:nth-child(1) { animation-delay: 0s; }
+        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes loadingPulse {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+        }
     </style>
 </head>
 <body class="min-h-screen">
+
+<!-- PAGE LOADER - see the #page-loader CSS comment above. First thing in
+     <body>, ahead of the form, so it's the very first thing painted -
+     removed by hideLoader() once loadInit() knows whether this student is
+     actually authenticated and the form has real data to show (or has
+     already redirected away, for a logged-out visitor). -->
+<div id="page-loader">
+    <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+        <ellipse cx="16" cy="18" rx="13" ry="11" fill="#8FCB8F"/>
+        <circle cx="11" cy="15" r="1.6" fill="#2A2A2A"/>
+        <circle cx="21" cy="15" r="1.6" fill="#2A2A2A"/>
+        <path d="M12 20 Q16 22.5 20 20" stroke="#2A2A2A" stroke-width="1" fill="none" stroke-linecap="round"/>
+    </svg>
+    <div class="loading-dots">
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+    </div>
+</div>
 
 <div class="max-w-xl mx-auto px-4 py-6 sm:py-10">
 
@@ -179,7 +235,19 @@ async function loadInit() {
         updateSubmitState();
     } catch (e) {
         showError("Couldn't load the form right now. Please try again.");
+    } finally {
+        // Fires even on the 401 redirect above (finally always runs before
+        // a function returns) - harmless there since the page is already
+        // navigating away, but avoids a stuck loader on a genuine failure.
+        hideLoader();
     }
+}
+
+/** Removes #page-loader (see the top of <body>) - only once this
+ * student's real form data (or a redirect) is actually ready. */
+function hideLoader() {
+    const loader = document.getElementById("page-loader");
+    if (loader) loader.remove();
 }
 
 function updateSubmitState() {

@@ -375,7 +375,20 @@ async function restoreSession() {
         // Server unreachable - if the server-rendered guess was "logged
         // in", leave that guess in place rather than bouncing to login on
         // a transient network blip.
+    } finally {
+        // Whichever branch above ran (or even the network-failure case),
+        // the real destination is now genuinely ready to show - `finally`
+        // guarantees this fires exactly once regardless of which path was
+        // taken, instead of duplicating the call at each branch.
+        hideLoader();
     }
+}
+
+/** Removes #page-loader (see index.html) - called only once the real
+ * destination page is actually ready to show, never on a timer/guess. */
+function hideLoader() {
+    const loader = document.getElementById("page-loader");
+    if (loader) loader.remove();
 }
 
 /** The explicit "auth genuinely failed" path - only ever shows the login

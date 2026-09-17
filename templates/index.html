@@ -18,8 +18,17 @@
          /favicon.ico and got a 404 on every load - reusing the existing
          school logo instead of adding a new asset. -->
     <link rel="icon" href="/static/Yaralogo.png">
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind CSS. defer (not blocking, like the two scripts below it):
+         #page-loader is plain CSS with no Tailwind classes, specifically so
+         it can paint on the very first frame without waiting on this CDN
+         fetch - a blocking script here would have delayed EVERYTHING after
+         it in <body>, including the loader itself. Any brief moment of
+         Tailwind-styled elements rendering unstyled while this loads is
+         invisible either way: the loader's opaque full-viewport background
+         covers the whole page underneath until app.js explicitly hides it,
+         by which point this has long since finished (defer scripts run
+         before DOMContentLoaded, same as marked.js/lottie.js already do). -->
+    <script src="https://cdn.tailwindcss.com" defer></script>
     <!-- Inter (body/UI) + Playfair Display (greeting text only) + Quicksand
          (YaraBot wordmark only) - one combined request, and only the exact
          weights actually used (Playfair/Quicksand: 700 only) rather than
@@ -39,6 +48,46 @@
          fires; every other call happens later still, from user actions. -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js" defer></script>
     <style>
+        /* ---- PAGE LOADER ----
+           Deliberately plain CSS, zero Tailwind classes and zero JS/Lottie
+           dependency - see the <script> comment above for why: this must
+           paint on the very first frame, before Tailwind's CDN fetch (or
+           any auth check/data fetch) has any chance to finish. Covers the
+           entire viewport at a higher z-index than everything else on the
+           page (kill modal included, z-index:60) so it fully masks
+           whichever real page ends up underneath until app.js's
+           hideLoader() removes it - see restoreSession()'s `finally`. */
+        #page-loader {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            background: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .loading-dots {
+            display: flex;
+            gap: 5px;
+        }
+        .loading-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--brand);
+            opacity: 0.3;
+            animation: loadingPulse 1.2s ease-in-out infinite;
+        }
+        .loading-dot:nth-child(1) { animation-delay: 0s; }
+        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes loadingPulse {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+        }
+
         * { font-family: 'Inter', sans-serif; }
 
         /* Scoped, not global: everything else (buttons, bubbles, labels)
@@ -576,6 +625,26 @@
     </style>
 </head>
 <body class="bg-white full-height overflow-hidden">
+
+<!-- PAGE LOADER - see the #page-loader CSS comment above. First thing in
+     <body> on purpose, ahead of both login-page and chat-page, so it's the
+     very first thing painted regardless of which of those two the server
+     decided to render visible. Removed by app.js's hideLoader(), called
+     once restoreSession() knows for certain which one is actually ready
+     to show (see that function's `finally` block). -->
+<div id="page-loader">
+    <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+        <ellipse cx="16" cy="18" rx="13" ry="11" fill="#8FCB8F"/>
+        <circle cx="11" cy="15" r="1.6" fill="#2A2A2A"/>
+        <circle cx="21" cy="15" r="1.6" fill="#2A2A2A"/>
+        <path d="M12 20 Q16 22.5 20 20" stroke="#2A2A2A" stroke-width="1" fill="none" stroke-linecap="round"/>
+    </svg>
+    <div class="loading-dots">
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+    </div>
+</div>
 
 <!-- ===================== LOGIN PAGE ===================== -->
 <!-- <main>, not <div>: exactly one of login-page/chat-page is visible at a
