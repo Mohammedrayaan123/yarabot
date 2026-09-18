@@ -6,10 +6,14 @@
     <title>File a Complaint - YaraBot</title>
     <link rel="icon" href="/static/Yaralogo.png">
     <!-- defer: #page-loader below is plain CSS with no Tailwind classes,
-         specifically so it paints before this CDN fetch (or the
-         /api/complaint/init call) has any chance to finish - see
+         specifically so its outer container paints before this CDN fetch
+         (or the /api/complaint/init call) has any chance to finish - see
          templates/index.html's matching comment for the full reasoning. -->
     <script src="https://cdn.tailwindcss.com" defer></script>
+    <!-- For the loader's chatbot.json mascot below - same asset/library as
+         the main chat page, loaded fresh here since this is a standalone
+         page with no shared JS file to reuse app.js's own cache from. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js" defer></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -54,36 +58,24 @@
         }
 
         /* ---- PAGE LOADER - see templates/index.html's matching comment
-           for why this is plain CSS with no Tailwind dependency. Matches
-           this page's own background (--brand-tint) rather than white,
-           since (unlike index.html) there's only one real destination
-           here to match. ---- */
+           for why the outer container is plain CSS with no Tailwind
+           dependency. Matches this page's own background (--brand-tint)
+           rather than white, since (unlike index.html) there's only one
+           real destination here to match. The mascot inside it is the
+           real chatbot.json Lottie (see the inline script below), same
+           asset as the main chat page - no pulsing dots alongside it. */
         #page-loader {
             position: fixed;
             inset: 0;
             z-index: 100;
             background: var(--brand-tint);
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 14px;
         }
-        .loading-dots { display: flex; gap: 5px; }
-        .loading-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: var(--brand);
-            opacity: 0.3;
-            animation: loadingPulse 1.2s ease-in-out infinite;
-        }
-        .loading-dot:nth-child(1) { animation-delay: 0s; }
-        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
-        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes loadingPulse {
-            0%, 100% { opacity: 0.3; }
-            50% { opacity: 1; }
+        #page-loader-lottie {
+            width: 96px;
+            height: 96px;
         }
     </style>
 </head>
@@ -95,17 +87,7 @@
      actually authenticated and the form has real data to show (or has
      already redirected away, for a logged-out visitor). -->
 <div id="page-loader">
-    <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
-        <ellipse cx="16" cy="18" rx="13" ry="11" fill="#8FCB8F"/>
-        <circle cx="11" cy="15" r="1.6" fill="#2A2A2A"/>
-        <circle cx="21" cy="15" r="1.6" fill="#2A2A2A"/>
-        <path d="M12 20 Q16 22.5 20 20" stroke="#2A2A2A" stroke-width="1" fill="none" stroke-linecap="round"/>
-    </svg>
-    <div class="loading-dots">
-        <span class="loading-dot"></span>
-        <span class="loading-dot"></span>
-        <span class="loading-dot"></span>
-    </div>
+    <div id="page-loader-lottie" aria-hidden="true"></div>
 </div>
 
 <div class="max-w-xl mx-auto px-4 py-6 sm:py-10">
@@ -163,7 +145,7 @@
                 <div id="submit-error" class="hidden text-red-600 text-sm bg-red-50 border border-red-100 rounded-lg py-2 px-3"></div>
 
                 <div class="flex items-center justify-between pt-1">
-                    <p class="text-xs text-gray-500"><span id="remaining-count">3</span> of <span id="max-count">3</span> left today</p>
+                    <p class="text-xs text-gray-500"><span id="remaining-count">3</span> of <span id="max-count">3</span> daily submissions left</p>
                     <button
                         id="submit-btn"
                         onclick="submitComplaint()"
@@ -203,6 +185,29 @@ const CATEGORIES = [
 ];
 
 let remainingToday = 0;
+
+// ---- Loader mascot (chatbot.json, same asset as the main chat page) ----
+// A minimal, single-purpose version of app.js's mountBotLottie() - this
+// standalone page has no shared JS file to reuse that cache/generalized
+// version from, and only ever needs this one instance.
+let loaderLottieAnim = null;
+
+function mountLoaderLottie() {
+    const container = document.getElementById("page-loader-lottie");
+    if (!container || typeof lottie === "undefined") return;
+    fetch("/static/chatbot.json").then(res => res.json()).then(data => {
+        if (!container.isConnected) return;
+        loaderLottieAnim = lottie.loadAnimation({
+            container, renderer: "svg", loop: true, autoplay: true, animationData: data,
+            rendererSettings: { preserveAspectRatio: "xMidYMid slice" }
+        });
+        // Same crop as app.js's LOTTIE_VIEWBOX_CROPS[BOT_LOTTIE_URL] - the
+        // character only occupies a small part of the native 500x500
+        // canvas, see that file's comment for the full measurement.
+        const svg = container.querySelector("svg");
+        if (svg) svg.setAttribute("viewBox", "45 73 400 400");
+    }).catch(() => {});   // decorative - never break the page over it
+}
 
 function renderCategories() {
     const container = document.getElementById("category-options");
@@ -248,6 +253,10 @@ async function loadInit() {
 function hideLoader() {
     const loader = document.getElementById("page-loader");
     if (loader) loader.remove();
+    if (loaderLottieAnim) {
+        loaderLottieAnim.destroy();
+        loaderLottieAnim = null;
+    }
 }
 
 function updateSubmitState() {
@@ -259,6 +268,7 @@ function updateSubmitState() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    mountLoaderLottie();
     renderCategories();
     loadInit();
     loadHistory();

@@ -14,6 +14,32 @@ Provider fallback: Gemini is the primary provider. If Gemini specifically
 fails due to rate limiting/quota, Groq (an OpenAI-compatible API) answers
 instead, using the same prompt and almanac context so answer quality stays
 consistent regardless of which provider actually responds.
+
+=========================================================
+NOVA'S VOICE — the single reference for how the bot talks
+=========================================================
+Applies everywhere the bot generates text a user reads: this file's
+Gemini/Groq prompt below AND app.py's hardcoded NLP-lane responses
+(greeting/thanks/help, handler replies, clarification prompts). The two
+systems don't share code, so this comment (not a shared constant) is
+what keeps them sounding like one assistant instead of two.
+
+- Name: Nova. Refers to itself as Nova, never as "an AI assistant" or
+  "a language model".
+- Tone: friendly but not bubbly. Helpful without being servile. Talks
+  like a helpful school office assistant, not a customer service bot.
+- Never uses corporate-assistant filler: "I'm here and ready to help",
+  "How can I assist you today?", "Feel free to ask", "I'd be happy to".
+- Never uses emoji in responses.
+- Short answers. A greeting is one or two sentences, not a paragraph.
+- Doesn't over-explain what it can do unless asked (i.e. unless the
+  user's message is itself a "help"/"what can you do" question).
+
+Found and fixed 2026-09-17: app.py's hardcoded greeting ("Hi, I'm Nova!
+... 😊") and Gemini's own unconstrained replies ("Hello! I'm here and
+ready to help...") read as two different personalities before this
+comment/the prompt update below existed - the fix is voice alignment on
+both sides, not merging the two systems.
 """
 
 import os
@@ -244,15 +270,13 @@ def search_notice_context(question, visible_roles):
 
 
 NO_CONTEXT_MESSAGE = (
-    "I don't have general school information available yet. "
-    "Please contact the school office directly."
+    "I don't have that information. Please check with the school office."
 )
 API_ERROR_MESSAGE = (
-    "I'm having trouble connecting to my knowledge base right now. "
-    "Please contact the school office for this information."
+    "I can't check the school information right now. Please try again shortly."
 )
 
-GEMINI_DECLINED_PHRASE = "I don't have that information — please contact the school office directly."
+GEMINI_DECLINED_PHRASE = "I don't have that information. Please check with the school office."
 
 GEMINI_MODEL = 'gemini-3.5-flash-lite'
 
@@ -271,7 +295,16 @@ FORCE_GROQ = os.getenv('FORCE_GROQ', 'false').strip().lower() == 'true'
 
 
 def _build_prompt(question, context):
-    return f"""You are a helpful assistant for Yara International School in Riyadh, Saudi Arabia.
+    # Persona block is additive, layered on top of the existing grounding/
+    # safety instructions below (unchanged) - see this file's NOVA'S VOICE
+    # comment at the top for the single reference both this prompt and
+    # app.py's hardcoded NLP-lane responses are meant to match.
+    return f"""You are Nova, the assistant for Yara International School. Keep responses brief and natural.
+Do not use phrases like "I'm here to help", "How may I assist you", or "Feel free to ask". Do not use emoji.
+When greeting or responding conversationally, be warm but brief - one or two sentences.
+Do not start a factual answer with a greeting.
+
+You are a helpful assistant for Yara International School in Riyadh, Saudi Arabia.
 Answer the question using ONLY the school information provided below.
 If the answer is not clearly in the provided information, say exactly:
 "{GEMINI_DECLINED_PHRASE}"

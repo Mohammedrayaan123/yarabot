@@ -228,7 +228,7 @@ function startLoginLockoutCountdown(seconds) {
         const mins = Math.floor(remaining / 60);
         const secs = remaining % 60;
         const timeStr = `${mins}:${String(secs).padStart(2, "0")}`;
-        errorEl.textContent = `Too many failed attempts. Please try again in ${timeStr}.`;
+        errorEl.textContent = `Too many sign-in attempts. Please try again in ${timeStr}.`;
         errorEl.classList.remove("hidden");
     };
 
@@ -309,6 +309,13 @@ function initViewportHeightFix() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    // First, so it starts loading as early as this architecture allows -
+    // lottie-web itself is a deferred script, so `lottie` isn't defined
+    // (and mountBotLottie() would silently no-op) any earlier than this
+    // event. Shares the same cached chatbot.json fetch as the login
+    // mascot below - no extra network request for this.
+    mountBotLottie(document.getElementById("page-loader-lottie"));
+
     initViewportHeightFix();
 
     document.getElementById("login-password").addEventListener("keydown", (e) => {
@@ -389,6 +396,11 @@ async function restoreSession() {
 function hideLoader() {
     const loader = document.getElementById("page-loader");
     if (loader) loader.remove();
+    // The Lottie instance mounted inside it (see DOMContentLoaded above)
+    // is now a detached, still-running animation with nothing referencing
+    // its container anymore - same cleanup already used for detached chat
+    // bubble/typing-indicator mascots elsewhere in this file.
+    cleanupDetachedLottie();
 }
 
 /** The explicit "auth genuinely failed" path - only ever shows the login
@@ -887,7 +899,7 @@ async function sendMessage() {
 
     } catch (e) {
         removeTypingBubble();
-        appendMessage("bot", "⚠️ Connection error. Please check that the server is running.");
+        appendMessage("bot", "Connection error. Please check that the server is running.");
     }
 }
 
@@ -1047,27 +1059,50 @@ function appendMessage(role, text) {
     container.scrollTop = container.scrollHeight;
 }
 
+/**
+ * Structurally mirrors buildMessageWrapper("bot") element-for-element
+ * (same wrapper/avatarRow classes, same avatar id pattern/size/mount call)
+ * rather than a hand-rolled innerHTML string, specifically so the avatar
+ * ends up the exact same size and in the exact same flex slot as it will
+ * be once the real reply lands - no separate layout to keep in sync by
+ * hand. Only genuine difference: no timestamp row (nothing to timestamp
+ * yet) and the bubble hugs its dots instead of taking .msg-bot's usual
+ * px-4 py-3 - see the .typing-indicator CSS comment for why that's
+ * intentional, not an oversight.
+ */
 function showTypingBubble() {
     const container = document.getElementById("chat-messages");
 
     const wrapper = document.createElement("div");
     wrapper.id = "typing-bubble";
-    wrapper.className = "flex items-end gap-2 fade-in";
+    wrapper.className = "flex flex-col fade-in items-start";
 
-    // Same animated mascot as a real bot message, so the avatar doesn't
-    // visibly swap when the reply lands.
-    wrapper.innerHTML = `
-        <div id="lottie-bot-typing" class="bot-lottie-chat flex-shrink-0"
-             style="width:${botLottieSize("--bot-size-chat", "44px")};height:${botLottieSize("--bot-size-chat", "44px")};"></div>
-        <div class="typing-bubble-pulse msg-bot px-4 py-3 flex items-center gap-1.5">
+    const avatarRow = document.createElement("div");
+    avatarRow.className = "flex items-end gap-2 flex-row";
+
+    const avatar = document.createElement("div");
+    avatar.id = "lottie-bot-typing";
+    avatar.className = "rounded-full flex items-center justify-center text-xs flex-shrink-0 bot-lottie-chat";
+    const size = botLottieSize("--bot-size-chat", "44px");
+    avatar.style.width = size;
+    avatar.style.height = size;
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bot";
+    bubble.innerHTML = `
+        <div class="typing-indicator">
             <span class="typing-dot"></span>
             <span class="typing-dot"></span>
             <span class="typing-dot"></span>
         </div>
     `;
 
+    avatarRow.appendChild(avatar);
+    avatarRow.appendChild(bubble);
+    wrapper.appendChild(avatarRow);
     container.appendChild(wrapper);
-    mountBotLottie(document.getElementById("lottie-bot-typing"));
+
+    mountBotLottie(avatar);
     container.scrollTop = container.scrollHeight;
 }
 

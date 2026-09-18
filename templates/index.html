@@ -49,43 +49,34 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js" defer></script>
     <style>
         /* ---- PAGE LOADER ----
-           Deliberately plain CSS, zero Tailwind classes and zero JS/Lottie
-           dependency - see the <script> comment above for why: this must
-           paint on the very first frame, before Tailwind's CDN fetch (or
-           any auth check/data fetch) has any chance to finish. Covers the
-           entire viewport at a higher z-index than everything else on the
-           page (kill modal included, z-index:60) so it fully masks
-           whichever real page ends up underneath until app.js's
-           hideLoader() removes it - see restoreSession()'s `finally`. */
+           The OUTER container (#page-loader itself) is still plain CSS,
+           zero Tailwind classes - see the <script> comment above for why:
+           it must paint on the very first frame, before Tailwind's CDN
+           fetch (or any auth check/data fetch) has any chance to finish.
+           Covers the entire viewport at a higher z-index than everything
+           else on the page (kill modal included, z-index:60) so it fully
+           masks whichever real page ends up underneath until app.js's
+           hideLoader() removes it - see restoreSession()'s `finally`.
+
+           The mascot INSIDE it is the real chatbot.json Lottie (same
+           asset as the login page's own mascot, reusing app.js's existing
+           loadLottieData() cache - no extra fetch beyond what already
+           happens) - mounted as early as DOMContentLoaded allows (see
+           app.js), looping at its normal built-in speed, no pulsing dots
+           alongside it: one moving element reads as loading, two felt
+           busier than intended. */
         #page-loader {
             position: fixed;
             inset: 0;
             z-index: 100;
             background: #fff;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 14px;
         }
-        .loading-dots {
-            display: flex;
-            gap: 5px;
-        }
-        .loading-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: var(--brand);
-            opacity: 0.3;
-            animation: loadingPulse 1.2s ease-in-out infinite;
-        }
-        .loading-dot:nth-child(1) { animation-delay: 0s; }
-        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
-        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes loadingPulse {
-            0%, 100% { opacity: 0.3; }
-            50% { opacity: 1; }
+        #page-loader-lottie {
+            width: 96px;
+            height: 96px;
         }
 
         * { font-family: 'Inter', sans-serif; }
@@ -152,11 +143,12 @@
         }
         /* Anchored to the ID card's own wrapper (a sibling, see the HTML
            comment by #sidebar-chameleon), not #sidebar - top/right offsets
-           here are relative to the CARD. Perched at the top-RIGHT corner,
-           near the gold star, well below the header row - nowhere near
-           #sidebar-close-btn regardless of viewport width. Desktop values
-           by default; overridden per-property (not just the size) inside
-           the @media block below on mobile. */
+           here are relative to the CARD. Perched at the top-RIGHT corner -
+           #sidebar-close-btn lives at top-LEFT (mobile only) specifically
+           so the two can never compete for the same corner, see that
+           button's own HTML comment. Desktop values by default; overridden
+           per-property (not just the size) inside the @media block below
+           on mobile. */
         .chameleon-perch-sidebar {
             width: var(--chameleon-size-sidebar-desktop);
             height: var(--chameleon-size-sidebar-desktop);
@@ -188,29 +180,33 @@
             border-radius: 18px 18px 18px 4px;
         }
 
-        /* Typing bubble - pulsing container */
-        .typing-bubble-pulse {
-            animation: bubblePulse 1.8s ease-in-out infinite;
+        /* Typing indicator - the bubble itself is .msg-bot (see app.js's
+           showTypingBubble()), same border/radius/background as a real bot
+           message, just hugging its content instead of .msg-bot's usual
+           px-4 py-3 - it visually already IS the message, not a
+           differently-styled placeholder swapped out when the reply
+           lands. No separate whole-bubble pulse layer anymore (the old
+           .typing-bubble-pulse/bubblePulse) - one motion signal (the dots
+           themselves), not two competing ones. */
+        .typing-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 10px;
         }
-        @keyframes bubblePulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.72; }
-        }
-
-        /* Typing bubble - sequential bouncing dots (iMessage style) */
         .typing-dot {
             width: 6px;
             height: 6px;
             border-radius: 50%;
-            background: #9ca3af;
+            background: #2d2b55;
             animation: typingDot 1.4s ease-in-out infinite;
         }
-        .typing-dot:nth-child(1) { animation-delay: 0s; }
-        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        .typing-dot:nth-child(1) { animation-delay: 0ms; }
+        .typing-dot:nth-child(2) { animation-delay: 160ms; }
+        .typing-dot:nth-child(3) { animation-delay: 320ms; }
         @keyframes typingDot {
-            0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-            30% { transform: translateY(-5px); opacity: 1; }
+            0%, 100% { opacity: 0.3; transform: translateY(0); }
+            50% { opacity: 1; transform: translateY(-3px); }
         }
 
         /* Smooth transitions - chat bubble appear. Subtle: a 4px settle,
@@ -633,17 +629,7 @@
      once restoreSession() knows for certain which one is actually ready
      to show (see that function's `finally` block). -->
 <div id="page-loader">
-    <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
-        <ellipse cx="16" cy="18" rx="13" ry="11" fill="#8FCB8F"/>
-        <circle cx="11" cy="15" r="1.6" fill="#2A2A2A"/>
-        <circle cx="21" cy="15" r="1.6" fill="#2A2A2A"/>
-        <path d="M12 20 Q16 22.5 20 20" stroke="#2A2A2A" stroke-width="1" fill="none" stroke-linecap="round"/>
-    </svg>
-    <div class="loading-dots">
-        <span class="loading-dot"></span>
-        <span class="loading-dot"></span>
-        <span class="loading-dot"></span>
-    </div>
+    <div id="page-loader-lottie" aria-hidden="true"></div>
 </div>
 
 <!-- ===================== LOGIN PAGE ===================== -->
@@ -847,7 +833,7 @@
             id="sidebar-close-btn"
             onclick="closeSidebar()"
             aria-label="Close menu"
-            class="md:hidden absolute top-4 right-4 w-11 h-11 flex items-center justify-center
+            class="md:hidden absolute top-4 left-4 w-11 h-11 flex items-center justify-center
                    rounded-lg text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-all z-10"
         >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
@@ -880,11 +866,14 @@
                  positioned child of it was actually escaping all the way up
                  to the page root and only coincidentally lining up near the
                  card (since the sidebar sits flush at the viewport's
-                 top-left corner) - and on mobile its fixed pixel offsets
-                 genuinely overlapped #sidebar-close-btn. Anchoring directly
-                 to the card fixes both: no ambiguous positioning context,
-                 and nowhere near the close button regardless of screen
-                 size, since the card sits well below the header row. -->
+                 top-left corner). Anchoring directly to the card fixes
+                 that: no ambiguous positioning context regardless of
+                 screen size. #sidebar-close-btn (mobile only) lives at
+                 top-LEFT specifically so it can never compete with this
+                 corner - it used to sit top-right and visibly overlapped
+                 the chameleon once its offset was tuned to hang more
+                 prominently (see the chameleon vars up top), a real
+                 regression found via a live screenshot, not guessed. -->
             <div class="relative">
                 <!-- Decorative only - perched/gripping the card's top-right
                      corner, near the gold star. aria-hidden +
@@ -949,7 +938,7 @@
              app.js's applySystemStatus() based on /api/system-status on
              load and the kill-switch response afterward. -->
         <div id="disabled-banner" class="hidden bg-red-50 border-b border-red-200 text-red-700 text-xs sm:text-sm text-center py-2 px-4 flex-shrink-0 relative z-20">
-            YaraBot is temporarily unavailable. Please contact the school administration.
+            Nova is temporarily unavailable. Please contact the school office.
         </div>
 
         <!-- Chat messages -->

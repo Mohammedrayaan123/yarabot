@@ -28,6 +28,7 @@ import time
 import json
 import math
 import hmac
+from itertools import cycle
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -193,8 +194,10 @@ GREETING_ONLY_PHRASES = {
     "good morning", "good afternoon", "good evening",
     "thanks", "thank you", "thanks a lot", "thx", "ty",
     "help", "what can you do", "what do you do",
-    "how are u", "how are you",
+    "who are you", "how are you", "how are u",
 }
+
+NOVA_GREETINGS = cycle(("Hi, I'm Nova.", "Hello, I'm Nova.", "Hi there, I'm Nova."))
 
 
 def _normalized_greeting(question):
@@ -843,7 +846,7 @@ def login():
         retry_after = _login_retry_after(rate_key)
         return jsonify({
             "success": False,
-            "error": "Too many failed attempts. Please try again later.",
+            "error": "Too many sign-in attempts. Please try again later.",
             "retry_after": retry_after
         }), 429
 
@@ -1390,11 +1393,11 @@ CLARIFICATION_TTL_SECONDS = 300
 CLARIFICATION_CONFIG = {
     "subject_teacher": {
         "role": "student",
-        "prompt": "Which subject would you like to know the teacher for?",
+        "prompt": "Which subject's teacher do you mean?",
     },
     "school_wide_subject_teacher": {
         "role": "principal",
-        "prompt": "Which subject would you like to know the teacher for?",
+        "prompt": "Which subject's teacher do you mean?",
     },
     "class_teacher_lookup": {
         "role": "principal",
@@ -1606,7 +1609,7 @@ def chat():
     # regardless of who's asking or whether they're even logged in.
     if not _chatbot_enabled():
         return jsonify({
-            "reply": "YaraBot is temporarily unavailable. Please contact the school administration.",
+            "reply": "Nova is temporarily unavailable. Please contact the school office.",
             "disabled": True
         })
 
@@ -2084,7 +2087,7 @@ def _extract_notice_filters(question):
     return urgent_only, offset
 
 
-PRIORITY_ICONS = {"urgent": "🔴 ", "important": "🟡 ", "normal": ""}
+PRIORITY_LABELS = {"urgent": "[Urgent] ", "important": "[Important] ", "normal": ""}
 
 
 def handle_notices(role, question):
@@ -2112,11 +2115,11 @@ def handle_notices(role, question):
         return "No notices posted at the moment." if offset == 0 else "No older notices found."
 
     lines = [
-        f"{PRIORITY_ICONS.get(priority, '')}**{title}** ({date_posted})\n{body}"
+        f"{PRIORITY_LABELS.get(priority, '')}**{title}** ({date_posted})\n{body}"
         for title, body, date_posted, priority in results
     ]
     header = "Urgent notices" if urgent_only else "Older notices" if offset else "Latest notices"
-    return f"📢 {header}:\n\n" + "\n\n".join(lines)
+    return f"{header}:\n\n" + "\n\n".join(lines)
 
 
 def handle_subjects_offered(question):
@@ -2204,7 +2207,7 @@ def handle_next_period(student_id):
     if upcoming:
         period_no, subject, teacher = upcoming[0]
         return f"Your next class is **{subject}** (Period {period_no}) with {teacher}."
-    return "Looks like you're done for the day! No more periods scheduled."
+    return "You have no more periods scheduled today."
 
 
 def handle_subject_teacher(question, student_id, known_subjects):
@@ -2223,7 +2226,7 @@ def handle_subject_teacher(question, student_id, known_subjects):
     subject = extract_subject_from_question(question, known_subjects)
 
     if not subject:
-        return "Which subject would you like to know the teacher for?"
+        return "Which subject's teacher do you mean?"
 
     results = query("""
         SELECT DISTINCT te.name
@@ -2254,7 +2257,7 @@ def handle_complaint_feedback():
     HOD/teacher ever in the loop (see the task this came from)."""
     return ("I can help you share your feedback privately. Your message will go directly "
             "to the Vice Principal — no teacher will see it.\n\n"
-            "👉 [Click here to file a complaint](/complaint)")
+            "[Click here to file a complaint](/complaint)")
 
 
 def handle_student_timetable(question, student_id):
@@ -2328,14 +2331,13 @@ def handle_student_exam(question, student_id, known_subjects):
         lines = []
         for subj, edate, etype in results:
             days_left = (edate - date.today()).days
-            icon = "🔴" if days_left <= 7 else "🟡" if days_left <= 14 else "🟢"
-            lines.append(f"{icon} **{subj}** ({etype}) — {edate} *(in {days_left} days)*")
+            lines.append(f"**{subj}** ({etype}) — {edate} *(in {days_left} days)*")
         header = f"Your upcoming **{subject}** exams:\n" if subject else "Your upcoming exams:\n"
         return header + "\n".join(lines)
 
     if subject:
         return f"You have no upcoming {subject} exams on record."
-    return "You have no upcoming exams on record. 🎉"
+    return "You have no upcoming exams on record."
 
 
 # =========================================================
@@ -2357,7 +2359,7 @@ def handle_teacher_next_class(teacher_id):
     if result:
         period_no, cls = result
         return f"Your next class is **{cls}** at Period {period_no}."
-    return "You have no more classes scheduled for today. 🎉"
+    return "You have no more classes scheduled for today."
 
 
 def handle_teacher_current_class(teacher_id):
@@ -2387,7 +2389,7 @@ def handle_teacher_free_periods(teacher_id):
     """, (teacher_id, today), fetch=True, many=True)
 
     if not results:
-        return f"No classes scheduled for you today ({today}) — fully free!"
+        return f"You have no classes scheduled today ({today})."
 
     occupied_periods = {r[0] for r in results}
     # Periods 1-10: matches the actual range used for period_no elsewhere
@@ -2399,7 +2401,7 @@ def handle_teacher_free_periods(teacher_id):
     if free:
         free_list = ", ".join(f"Period {p}" for p in free)
         return f"You're free during: **{free_list}** today."
-    return "You're booked solid today — no free periods!"
+    return "You have no free periods today."
 
 
 def handle_teacher_periods_remaining(teacher_id):
@@ -2414,7 +2416,7 @@ def handle_teacher_periods_remaining(teacher_id):
 
     count = result[0] if result else 0
     if count == 0:
-        return "You're done for the day! No more periods left. 🎉"
+        return "You're done for the day — no more periods left."
     return f"You have **{count} period(s)** left today."
 
 
@@ -2525,9 +2527,9 @@ def handle_complaint_summary():
     result = query("SELECT COUNT(*) FROM complaints WHERE status='new'", fetch=True)
     count = result[0] if result else 0
     if count == 0:
-        return "No new complaints right now. 👍\n\n👉 [Open the complaints dashboard](/vp/complaints)"
+        return "No new complaints right now.\n\n[Open the complaints dashboard](/vp/complaints)"
     return (f"You have **{count} new complaint{'s' if count != 1 else ''}** awaiting review.\n\n"
-            "👉 [Open the complaints dashboard](/vp/complaints)")
+            "[Open the complaints dashboard](/vp/complaints)")
 
 
 def handle_teacher_timetable(question, teacher_id):
@@ -2721,7 +2723,7 @@ def handle_school_wide_subject_teacher(question):
     cls = extract_class_from_question(question)
 
     if not subject:
-        return "Which subject would you like to know the teacher for?"
+        return "Which subject's teacher do you mean?"
 
     sql = """
         SELECT DISTINCT te.name, t.class
@@ -2804,7 +2806,7 @@ def handle_low_attendance_count():
     """, fetch=True, many=True)
 
     if not results:
-        return "Great news — no students are currently below 75% attendance."
+        return "No students are currently below 75% attendance."
 
     count = len(results)
     lines = [f"- {name} ({cls}): {att}%" for name, cls, att in results[:10]]
@@ -2819,7 +2821,7 @@ def handle_pending_fees_count():
     """, fetch=True, many=True)
 
     if not results:
-        return "All student fees are currently paid. ✅"
+        return "All student fees are currently paid."
 
     count = len(results)
     lines = [f"- {name} ({cls})" for name, cls in results[:10]]
@@ -2860,7 +2862,7 @@ def answer_student(question, student_id, forced_intent=None):
     # forced_intent: set by the classifier lane when it already picked the
     # intent (see classify_personal_intent() in gemini_rag.py) - skips
     # detect_intent() and goes straight into the same dispatch below.
-    intent = "greeting" if _is_wellbeing_greeting(question) else forced_intent if forced_intent is not None else detect_intent(
+    intent = "greeting" if _normalized_greeting(question) in ("who are you", "how are you", "how are u") else forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
          "identity", "roll_number", "my_class", "class_teacher", "next_period",
@@ -2881,21 +2883,21 @@ def answer_student(question, student_id, forced_intent=None):
     if intent == "greeting":
         if _is_wellbeing_greeting(question):
             return "I'm doing well, thanks."
-        return "Hi, I'm Nova! Ask me about your attendance, exams, timetable, or fees. 😊"
+        return next(NOVA_GREETINGS)
     elif intent == "thanks":
-        return "You're welcome! Let me know if you need anything else. 👍"
+        return "You're welcome."
     elif intent == "help":
-        return ("Hi, I'm Nova! Here's what I can help with:\n"
-                "📊 **Attendance** — *'what's my attendance'*\n"
-                "📅 **Exams** — *'when is my next exam'* (add a subject to filter)\n"
-                "🕐 **Timetable** — *'show my timetable'* (add a day, e.g. 'Monday' or 'today')\n"
-                "💰 **Fees** — *'is my fee paid'*\n"
-                "🙋 **My details** — *'who am i'*, *'my roll number'*, *'what class am i in'*\n"
-                "⏭ **Next period** — *'what's my next period'*\n"
-                "👩‍🏫 **Subject teacher** — *'who teaches me math'*\n"
-                "🏫 **Class teacher** — *'who is my class teacher'*\n"
-                "📢 **Notices** — *'any announcements'*\n"
-                "📝 **Complaint/feedback** — *'i want to complain'*")
+        return ("I'm Nova. Here's what I can help with:\n"
+                "- **Attendance** — 'what's my attendance'\n"
+                "- **Exams** — 'when is my next exam' (add a subject to filter)\n"
+                "- **Timetable** — 'show my timetable' (add a day, e.g. 'Monday' or 'today')\n"
+                "- **Fees** — 'is my fee paid'\n"
+                "- **My details** — 'who am i', 'my roll number', 'what class am i in'\n"
+                "- **Next period** — 'what's my next period'\n"
+                "- **Subject teacher** — 'who teaches me math'\n"
+                "- **Class teacher** — 'who is my class teacher'\n"
+                "- **Notices** — 'any announcements'\n"
+                "- **Complaint/feedback** — 'i want to complain'")
 
     if intent == "attendance":
         result = query(
@@ -2904,7 +2906,7 @@ def answer_student(question, student_id, forced_intent=None):
         )
         if result:
             att = float(result[0])
-            status = "✅ Great standing!" if att >= 75 else "⚠️ Below required 75% — please improve."
+            status = "Good standing." if att >= 75 else "Below the required 75% — please improve."
             return f"Your current attendance is **{att}%**. {status}"
         return "I couldn't find your attendance record."
 
@@ -2921,7 +2923,7 @@ def answer_student(question, student_id, forced_intent=None):
             (student_id,), fetch=True
         )
         if result:
-            status = "✅ Paid" if result[0] == "paid" else "⚠️ Pending — please contact the school office"
+            status = "Paid" if result[0] == "paid" else "Pending — please contact the school office"
             return f"Your fees status: **{status}**"
         return "I couldn't find your fee status."
 
@@ -2973,7 +2975,7 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
     # in this function treats all three identically. Defaults to "teacher"
     # so existing callers (e.g. nlp_audit_test.py) that don't pass it are
     # unaffected.
-    intent = "greeting" if _is_wellbeing_greeting(question) else forced_intent if forced_intent is not None else detect_intent(
+    intent = "greeting" if _normalized_greeting(question) in ("who are you", "how are you", "how are u") else forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
          "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
@@ -2983,31 +2985,31 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
     if intent == "greeting":
         if _is_wellbeing_greeting(question):
             return "I'm doing well, thanks."
-        return "Hi, I'm Nova! Ask me about your schedule, periods, or classes. 😊"
+        return next(NOVA_GREETINGS)
     elif intent == "thanks":
-        return "You're welcome! 👍"
+        return "You're welcome."
     elif intent == "help":
         department_help = (
-            "\n🏢 **Department** — *'which teachers in my department are free'*, "
-            "*'my department's schedule today'*, *'how many teachers are in my department'*"
+            "\n- **Department** — 'which teachers in my department are free', "
+            "'my department's schedule today', 'how many teachers are in my department'"
             if extra_intents else ""
         )
         # Deliberately gated on the literal role, not `extra_intents` -
         # HOD's own extra_intents is HOD_DEPARTMENT_INTENTS only, but this
         # line must never appear for a plain hod (see VP_ONLY_INTENTS).
         vp_help = (
-            "\n📋 **Complaints** — *'any new complaints'*"
+            "\n- **Complaints** — 'any new complaints'"
             if role == "vice_principal" else ""
         )
-        return ("Hi, I'm Nova! Here's what I can help with:\n"
-                "🕐 **Schedule** — *'show my timetable'* (add a day, e.g. 'Monday' or 'today')\n"
-                "📊 **Periods** — *'how many periods do I have'*\n"
-                "🏫 **Classes** — *'which classes do I teach'*\n"
-                "⏭ **Next/current class** — *'what am I teaching next'*, *'what am I teaching now'*\n"
-                "🆓 **Free periods** — *'am I free right now'*, *'free periods today'*\n"
-                "⏳ **Periods left today** — *'how many periods do I have left'*\n"
-                "🙋 **My details** — *'who am i'*\n"
-                "📢 **Notices** — *'any announcements'*" + department_help + vp_help)
+        return ("I'm Nova. Here's what I can help with:\n"
+                "- **Schedule** — 'show my timetable' (add a day, e.g. 'Monday' or 'today')\n"
+                "- **Periods** — 'how many periods do I have'\n"
+                "- **Classes** — 'which classes do I teach'\n"
+                "- **Next/current class** — 'what am I teaching next', 'what am I teaching now'\n"
+                "- **Free periods** — 'am I free right now', 'free periods today'\n"
+                "- **Periods left today** — 'how many periods do I have left'\n"
+                "- **My details** — 'who am i'\n"
+                "- **Notices** — 'any announcements'" + department_help + vp_help)
 
     if intent == "period_count":
         # "periods today" is one of this intent's own phrases, so without
@@ -3088,7 +3090,7 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
 
 def answer_principal(question, forced_intent=None):
     # forced_intent: see answer_student()'s matching comment above.
-    if _is_wellbeing_greeting(question):
+    if _normalized_greeting(question) in ("who are you", "how are you", "how are u"):
         intent = "greeting"
     elif forced_intent is not None:
         intent = forced_intent
@@ -3147,36 +3149,36 @@ def answer_principal(question, forced_intent=None):
     if intent == "greeting":
         if _is_wellbeing_greeting(question):
             return "I'm doing well, thanks."
-        return "Good day! I'm Nova. Ask me about student numbers, teachers, or class breakdowns. 😊"
+        return next(NOVA_GREETINGS)
     elif intent == "thanks":
-        return "You're welcome! 👍"
+        return "You're welcome."
     elif intent == "help":
         return ("I'm Nova — here's what I can show:\n"
-                "👥 **Total students**\n"
-                "👨‍🏫 **Total teachers** (or *'how many teachers teach math'* for a subject)\n"
-                "📊 **Class-wise breakdown**\n"
-                "📍 **Where is a teacher** — *'where is <name>'*\n"
-                "🚪 **Who's in a class** — *'who is teaching class 10-A'*\n"
-                "🆓 **Free teachers** — *'which teachers are free right now'*\n"
-                "🗓 **A teacher's schedule** — *'schedule for <name>'*\n"
-                "📅 **A class's timetable** — *'timetable for class 10-A'*\n"
-                "👩‍🏫 **Subject teachers** — *'who teaches math'*\n"
-                "🧑‍🏫 **A class's teachers** — *'who teaches class 10-A'*\n"
-                "🏫 **A class's class teacher** — *'class teacher for 10-A'*\n"
-                "⚠️ **Attendance risk** — *'students with low attendance'*\n"
-                "💰 **Pending fees** — *'pending fees'*\n"
-                "📢 **Notices** — *'any announcements'*")
+                "- **Total students**\n"
+                "- **Total teachers** (or 'how many teachers teach math' for a subject)\n"
+                "- **Class-wise breakdown**\n"
+                "- **Where is a teacher** — 'where is <name>'\n"
+                "- **Who's in a class** — 'who is teaching class 10-A'\n"
+                "- **Free teachers** — 'which teachers are free right now'\n"
+                "- **A teacher's schedule** — 'schedule for <name>'\n"
+                "- **A class's timetable** — 'timetable for class 10-A'\n"
+                "- **Subject teachers** — 'who teaches math'\n"
+                "- **A class's teachers** — 'who teaches class 10-A'\n"
+                "- **A class's class teacher** — 'class teacher for 10-A'\n"
+                "- **Attendance risk** — 'students with low attendance'\n"
+                "- **Pending fees** — 'pending fees'\n"
+                "- **Notices** — 'any announcements'")
 
     if intent == "total_students":
         result = query("SELECT COUNT(*) FROM students", fetch=True)
         if result:
-            return f"There are **{result[0]} students** enrolled in total. 👥"
+            return f"There are **{result[0]} students** enrolled in total."
         return "I couldn't retrieve the student count right now."
 
     elif intent == "total_teachers":
         result = query("SELECT COUNT(*) FROM teachers", fetch=True)
         if result:
-            return f"There are **{result[0]} teachers** on staff. 👨‍🏫"
+            return f"There are **{result[0]} teachers** on staff."
         return "I couldn't retrieve the teacher count right now."
 
     elif intent == "class_wise_count":
