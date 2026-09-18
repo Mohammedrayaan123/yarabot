@@ -1759,6 +1759,8 @@ elif page == "Almanac":
     except Exception as e:
         st.error(f"Could not load the shared almanac: {e}")
     else:
+        if st.session_state.pop("almanac_saved", False):
+            st.success("Almanac updated. Nova will use the new information within about a minute.")
         if "almanac_editor_version" not in st.session_state:
             st.session_state["almanac_editor_version"] = current_version
         editor_version = st.session_state["almanac_editor_version"]
@@ -1782,7 +1784,8 @@ elif page == "Almanac":
                 try:
                     if save_almanac(new_content, editor_version):
                         st.session_state["almanac_editor_version"] = editor_version + 1
-                        st.success("Almanac updated. Nova will use the new information within about a minute.")
+                        st.session_state["almanac_saved"] = True
+                        st.rerun()
                     else:
                         st.warning("The almanac changed since you opened it. Reload the page before saving your edit.")
                 except Exception as e:
