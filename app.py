@@ -33,7 +33,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth_helpers import verify_password
 from nlp_helpers import detect_intent, detect_intent_with_score, rank_intents, refresh_phrase_cache
-from gemini_rag import gemini_answer_stream, almanac_top_score, classify_personal_intent, log_learned_phrase
+from gemini_rag import gemini_answer_stream, almanac_match_confidence, classify_personal_intent, log_learned_phrase
 from config import DB_CONFIG
 from validators import GRADE_SECTION_PATTERN, EARLY_YEARS_CLASSES
 import mysql.connector
@@ -169,7 +169,7 @@ GENERAL_KNOWLEDGE_SIGNALS = [
 # "announcement" used to be in this list, but it shadowed the real
 # `notices` NLP intent (zero occurrences in school_almanac.txt anyway) -
 # "any announcements" was being forced to Gemini instead of the actual
-# notices. Removed; the almanac_top_score() tie-break further down covers
+# notices. Removed; the almanac confidence check further down covers
 # it if a future almanac edit ever legitimately uses the word.
 
 
@@ -277,14 +277,9 @@ def _personal_intents_for_role(role):
 COMPLAINT_VIEWER_ROLES = {"vice_principal", "admin"}
 
 
-# Thresholds for the almanac-overlap tie-break (see _nlp_lane_decision).
-# ALMANAC_STRONG_MATCH_SCORE=2 was picked against real almanac content:
-# "teachers day" scores 2 against the "Teacher's Day" section (both
-# "teachers" and "day" match) - a single stray word (score 1) is too weak
-# to override a genuine NLP match, but 2 isn't. NLP_PHRASE_MATCH_SCORE=3
-# matches nlp_helpers.score_intent()'s +3-per-phrase scoring, so anything
-# under 3 is keyword-only by construction.
-ALMANAC_STRONG_MATCH_SCORE = 2
+# Almanac context can be injected on a light match; bypassing the personal
+# classifier requires the stricter score and query coverage checked by
+# gemini_rag.almanac_match_confidence().
 NLP_PHRASE_MATCH_SCORE = 3
 
 # Ambiguity guard thresholds (see _nlp_lane_decision). A single top score is
@@ -500,8 +495,8 @@ def _nlp_lane_decision(question, role):
     personal intent's keywords and real almanac content): nlp_helpers.py's
     score_intent() won't award a point for a bare AMBIGUOUS_KEYWORDS match
     with no phrase and no personal signal. Here, even when NLP still finds
-    a weak (keyword-only) match, a STRONG competing almanac match (>=
-    ALMANAC_STRONG_MATCH_SCORE, >= the NLP score) wins the tie - checked
+    a weak (keyword-only) match, a confident competing almanac match
+    (stricter score and query coverage, >= the NLP score) wins the tie - checked
     against the almanac's actual current content, so a future addition
     ("Founders' Day") is automatically protected with no code change.
 
@@ -593,8 +588,8 @@ def _nlp_lane_decision(question, role):
     if has_personal_pronoun and intent is not None:
         return True, False, intent, nlp_score, None, None
 
-    almanac_score = almanac_top_score(question)
-    almanac_confident = almanac_score >= ALMANAC_STRONG_MATCH_SCORE and almanac_score >= nlp_score
+    almanac_score, almanac_confident = almanac_match_confidence(question)
+    almanac_confident = almanac_confident and almanac_score >= nlp_score
 
     if intent is not None:
         # Weak (keyword-only) match, no personal-pronoun protection. If the
@@ -609,7 +604,7 @@ def _nlp_lane_decision(question, role):
     # wording. A confident almanac match still wins outright with no need
     # for the classifier; otherwise this is exactly the "neither lane
     # confident" gap the classifier exists to catch.
-    if almanac_score >= ALMANAC_STRONG_MATCH_SCORE:
+    if almanac_confident:
         return False, False, None, 0, None, None
 
     return False, True, None, 0, None, None

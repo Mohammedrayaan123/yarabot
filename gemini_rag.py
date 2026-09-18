@@ -19,6 +19,8 @@ consistent regardless of which provider actually responds.
 import os
 import re
 import time
+import math
+from collections import Counter
 import mysql.connector
 from google import genai
 from openai import OpenAI
@@ -39,23 +41,22 @@ def load_almanac(path='school_almanac.txt'):
 # message (including the NLP-lane tie-break), so we cache by mtime instead -
 # a cheap stat call per question instead of a full read.
 ALMANAC_PATH = 'school_almanac.txt'
-_almanac_cache = {'content': load_almanac(ALMANAC_PATH), 'mtime': None}
+_almanac_cache = {'content': load_almanac(ALMANAC_PATH), 'mtime_ns': None}
 try:
-    _almanac_cache['mtime'] = os.path.getmtime(ALMANAC_PATH)
+    _almanac_cache['mtime_ns'] = os.stat(ALMANAC_PATH).st_mtime_ns
 except OSError:
-    _almanac_cache['mtime'] = None
+    pass
 
 
 def get_almanac():
-   
     try:
-        current_mtime = os.path.getmtime(ALMANAC_PATH)
+        current_mtime = os.stat(ALMANAC_PATH).st_mtime_ns
     except OSError:
         return _almanac_cache['content']
 
-    if current_mtime != _almanac_cache['mtime']:
+    if current_mtime != _almanac_cache['mtime_ns']:
         _almanac_cache['content'] = load_almanac(ALMANAC_PATH)
-        _almanac_cache['mtime'] = current_mtime
+        _almanac_cache['mtime_ns'] = current_mtime
         print(f"[ALMANAC RELOADED] {len(_almanac_cache['content'])} chars")
 
     return _almanac_cache['content']
@@ -99,38 +100,96 @@ def _section_covers_grade(section, grade_n):
     return False
 
 
+_ALMANAC_HEADING = re.compile(r'(?m)^-{20,}\s*\n([^\n]+)\n-{20,}\s*')
+_ALMANAC_SUBHEADING = re.compile(r'(?m)^([A-Z][A-Z0-9 /&()\-]{3,}:?)\s*$')
+_ALMANAC_STOPWORDS = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
+                      'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
+                      'can', 'you', 'tell', 'give', 'show', 'for', 'of', 'to',
+                      'policy', 'procedure'}
+_ALMANAC_GENERIC_TERMS = {'school', 'date', 'day', 'time', 'hour', 'fee', 'parent'}
+ALMANAC_CONTEXT_MATCH_SCORE = 1.0
+ALMANAC_CLASSIFIER_BYPASS_SCORE = 6.0
+
+
+def _almanac_sections(almanac):
+    """Keep each heading with its body and split named subsections with context."""
+    headings = list(_ALMANAC_HEADING.finditer(almanac))
+    if not headings:
+        return [s.strip() for s in re.split(r'\n\s*\n', almanac) if s.strip()]
+
+    sections = []
+    for index, heading in enumerate(headings):
+        title = heading.group(1).strip()
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(almanac)
+        body = almanac[heading.end():end].strip()
+        if not body:
+            continue
+        if title.startswith('FREQUENTLY ASKED QUESTIONS'):
+            for part in re.split(r'(?m)(?=^Q: )', body):
+                if part.strip().startswith('Q: '):
+                    question_line, answer = part.strip().split('\n', 1)
+                    sections.append(f"{title} / {question_line}\n{answer}")
+            continue
+        subheadings = list(_ALMANAC_SUBHEADING.finditer(body))
+        if not subheadings:
+            sections.append(f"{title}\n{body}")
+            continue
+        prelude = body[:subheadings[0].start()].strip()
+        if prelude:
+            sections.append(f"{title}\n{prelude}")
+        for subindex, subheading in enumerate(subheadings):
+            subend = subheadings[subindex + 1].start() if subindex + 1 < len(subheadings) else len(body)
+            subsection = body[subheading.end():subend].strip()
+            if subsection:
+                sections.append(f"{title} / {subheading.group(1).strip()}\n{subsection}")
+    return sections
+
+
+def _almanac_words(text):
+    return {'transport' if word == 'transportation' else _singularize(word)
+            for word in re.findall(r'\b\w+\b', text.casefold())}
+
+
+def _almanac_question_words(question):
+    words = _almanac_words(question) - _ALMANAC_STOPWORDS
+    grade_n = _question_grade_number(question.lower())
+    if grade_n is not None:
+        words.discard(str(grade_n))
+    return words, grade_n
+
+
 def _score_almanac_sections(question):
-    
     almanac = get_almanac()
     if not almanac:
         return []
 
-    sections = [s.strip() for s in re.split(r'\n\s*\n', almanac) if s.strip()]
-
-    stopwords = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
-                 'a', 'an', 'my', 'me', 'i', 'do', 'does', 'please',
-                 'can', 'you', 'tell', 'give', 'show'}
-
-    cleaned_question = question.lower()
-    for ch in '?!.,':
-        cleaned_question = cleaned_question.replace(ch, '')
-    cleaned_question = cleaned_question.replace("'", "").replace("’", "")
-    question_words = set(cleaned_question.split()) - stopwords
-    grade_n = _question_grade_number(cleaned_question)
-    if grade_n is not None:
-        question_words.discard(str(grade_n))
+    sections = _almanac_sections(almanac)
+    section_words = [(_almanac_words(section.split('\n', 1)[0]),
+                      _almanac_words(section.split('\n', 1)[1] if '\n' in section else ''))
+                     for section in sections]
+    document_frequency = Counter(word for title_words, body_words in section_words
+                                 for word in title_words | body_words)
+    question_words, grade_n = _almanac_question_words(question)
 
     scored = []
-    for section in sections:
-        section_lower = section.lower().replace("'", "").replace("’", "")
-        section_squished = re.sub(r'\s+', '', section_lower)
-        score = sum(
-            1 for word in question_words
-            if word in section_lower or word in section_squished
-        )
+    for section, (title_words, body_words) in zip(sections, section_words):
+        matched = question_words & (title_words | body_words)
+        if len(question_words) >= 3 and len(matched) < 2:
+            continue
+        topic_words = question_words - _ALMANAC_GENERIC_TERMS
+        if topic_words and not (topic_words & matched):
+            continue
+        score = 0.0
+        for word in question_words:
+            if word not in title_words and word not in body_words:
+                continue
+            idf = min(2.0, 1.0 + math.log((len(sections) + 1) / (document_frequency[word] + 1)))
+            score += idf * (2.5 if word in title_words else 1.0)
+        if question_words:
+            score *= len(matched) / len(question_words)
         if grade_n and _section_covers_grade(section, grade_n):
             score += 3
-        if score > 0:
+        if score >= ALMANAC_CONTEXT_MATCH_SCORE:
             scored.append((score, section))
 
     scored.sort(reverse=True, key=lambda pair: pair[0])
@@ -154,6 +213,18 @@ def almanac_top_score(question):
 
     scored = _score_almanac_sections(question)
     return scored[0][0] if scored else 0
+
+
+def almanac_match_confidence(question):
+    """Return the top score and whether it can safely bypass classification."""
+    scored = _score_almanac_sections(question)
+    if not scored:
+        return 0, False
+    score, section = scored[0]
+    query_words, _ = _almanac_question_words(question)
+    matched = query_words & _almanac_words(section)
+    coverage = len(matched) / len(query_words) if query_words else 0
+    return score, score >= ALMANAC_CLASSIFIER_BYPASS_SCORE and coverage >= 0.75
 
 
 _NOTICE_STOPWORDS = {'what', 'when', 'where', 'how', 'who', 'is', 'are', 'the',
@@ -444,8 +515,12 @@ def _overlap_score(words_a, words_b):
 
 def find_cached_answer(normalized_question):
     """Return an unexpired answer only for this exact cache key."""
+    get_almanac()  # Refresh the file version before considering an old answer.
     entry = _cache.get(normalized_question)
     if entry is None:
+        return None
+    if entry.get('almanac_version') != _almanac_cache['mtime_ns']:
+        del _cache[normalized_question]
         return None
     if time.time() - entry['timestamp'] > CACHE_TTL_SECONDS:
         del _cache[normalized_question]
@@ -561,11 +636,12 @@ def log_learned_phrase(question, intent, role):
         print(f'[LEARNED PHRASE LOG ERROR] {e}')
 
 
-def cache_answer(normalized_question, answer):
+def cache_answer(normalized_question, answer, almanac_version):
     """Store a Gemini answer in the cache."""
     _cache[normalized_question] = {
         'answer': answer,
-        'timestamp': time.time()
+        'timestamp': time.time(),
+        'almanac_version': almanac_version,
     }
     print(f'[CACHE STORED] Question: {normalized_question}')
     print(f'[CACHE SIZE] {len(_cache)} entries')
@@ -583,6 +659,7 @@ def gemini_answer(question, visible_roles=()):
             return cached
 
     almanac_context = search_almanac(question)
+    almanac_version = _almanac_cache['mtime_ns']
     context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
@@ -620,7 +697,7 @@ def gemini_answer(question, visible_roles=()):
     if used_notice:
         print(f'[CACHE SKIPPED] Notice-grounded answer not cached: {normalized}')
     else:
-        cache_answer(normalized, answer)
+        cache_answer(normalized, answer, almanac_version)
     return answer
 
 
@@ -638,6 +715,7 @@ def gemini_answer_stream(question, visible_roles=()):
             return
 
     almanac_context = search_almanac(question)
+    almanac_version = _almanac_cache['mtime_ns']
     context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
@@ -686,4 +764,4 @@ def gemini_answer_stream(question, visible_roles=()):
         if used_notice:
             print(f'[CACHE SKIPPED] Notice-grounded answer not cached: {normalized}')
         else:
-            cache_answer(normalized, full_answer)
+            cache_answer(normalized, full_answer, almanac_version)
