@@ -17,6 +17,7 @@ import mysql.connector
 import pandas as pd
 from auth_helpers import hash_password, verify_password
 from config import DB_CONFIG
+from almanac_store import read_almanac, save_almanac, append_suggested_almanac_entry
 from nlp_helpers import check_phrase_safety, add_phrase, refresh_phrase_cache, INTENT_DATA, ALWAYS_SCORED_INTENTS
 from app import ROLE_PERSONAL_INTENTS
 from validators import (
@@ -1742,52 +1743,54 @@ elif page == "Notices":
 
 # =========================================================
 # PAGE: ALMANAC
-# Self-service editor for school_almanac.txt - the general school
-# knowledge Gemini uses (holidays, PTM dates, policies, etc). Saving here
-# takes effect immediately: gemini_rag.py's get_almanac() auto-reloads the
-# file whenever its last-modified time changes, so there's no need to
-# restart the Flask app after saving.
+# Self-service editor for the shared almanac database record.
 # =========================================================
 elif page == "Almanac":
     st.title("School Almanac / General Information")
     st.caption(
         "This is the general school knowledge the AI assistant (Nova) uses to answer "
         "questions like holidays, PTM dates, admissions, and school policies. "
-        "Edit it here - changes take effect automatically, no restart needed."
+        "Edit it here - Nova picks up changes within about a minute."
     )
 
-    # Must match gemini_rag.py's ALMANAC_PATH exactly - both dashboard.py
-    # and app.py/gemini_rag.py are run from the project root, so the same
-    # relative filename resolves to the same file for both.
-    almanac_path = "school_almanac.txt"
-
+    current_content = None
     try:
-        with open(almanac_path, "r", encoding="utf-8") as f:
-            current_content = f.read()
-    except FileNotFoundError:
-        current_content = ""
-        st.warning("⚠️ No almanac file found yet. Start writing below to create one.")
+        current_content, current_version = read_almanac()
+    except Exception as e:
+        st.error(f"Could not load the shared almanac: {e}")
+    else:
+        if "almanac_editor_version" not in st.session_state:
+            st.session_state["almanac_editor_version"] = current_version
+        editor_version = st.session_state["almanac_editor_version"]
+        if editor_version != current_version:
+            st.warning("The almanac changed since you opened it. Reload the latest version before editing.")
+            if st.button("Reload latest almanac"):
+                st.session_state["almanac_editor_version"] = current_version
+                st.rerun()
+        with st.form("edit_almanac_form"):
+            new_content = st.text_area(
+                "Almanac content",
+                value=current_content,
+                key=f"almanac_content_{editor_version}",
+                height=600,
+                help="Keep related information grouped together, separated by a blank line - "
+                     "this helps Nova find the right section when answering a question."
+            )
+            save_clicked = st.form_submit_button("Save Changes")
 
-    with st.form("edit_almanac_form"):
-        new_content = st.text_area(
-            "Almanac content",
-            value=current_content,
-            height=600,
-            help="Keep related information grouped together, separated by a blank line - "
-                 "this helps the AI find the right section when answering a question."
-        )
-        save_clicked = st.form_submit_button("Save Changes")
-
-        if save_clicked:
-            try:
-                with open(almanac_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                st.success("✅ Almanac updated! The chatbot will use the new information immediately - no restart needed.")
-            except Exception as e:
-                st.error(f"⚠️ Could not save: {e}")
+            if save_clicked:
+                try:
+                    if save_almanac(new_content, editor_version):
+                        st.session_state["almanac_editor_version"] = editor_version + 1
+                        st.success("Almanac updated. Nova will use the new information within about a minute.")
+                    else:
+                        st.warning("The almanac changed since you opened it. Reload the page before saving your edit.")
+                except Exception as e:
+                    st.error(f"Could not save the almanac: {e}")
 
     st.divider()
-    st.caption(f"Current file size: {len(current_content)} characters")
+    if current_content is not None:
+        st.caption(f"Current almanac size: {len(current_content)} characters")
 
 
 # =========================================================
@@ -1823,10 +1826,6 @@ elif page == "Suggested Additions":
     if not suggestions:
         st.info("No unanswered questions logged yet - once Nova can't answer something, it'll show up here.")
     else:
-        # Must match gemini_rag.py's ALMANAC_PATH exactly - see the same
-        # note on the Almanac page above.
-        almanac_path = "school_almanac.txt"
-
         for qid, question_text, ask_count, first_asked, last_asked in suggestions:
             with st.expander(f"({ask_count}x) {question_text}"):
                 st.caption(f"First asked: {first_asked} · Last asked: {last_asked}")
@@ -1863,32 +1862,17 @@ elif page == "Suggested Additions":
                             if not answer.strip():
                                 st.error("⚠️ Please write an answer before saving.")
                             else:
-                                # Same read-then-write mechanism as the Almanac page above:
-                                # gemini_rag.py's get_almanac() picks up the mtime change
-                                # automatically, no restart needed.
                                 try:
-                                    with open(almanac_path, "r", encoding="utf-8") as f:
-                                        existing = f.read()
-                                except FileNotFoundError:
-                                    existing = ""
-
-                                new_section = f"{topic.strip()}\n{answer.strip()}"
-                                separator = "\n\n" if existing.strip() else ""
-                                updated = existing.rstrip("\n") + separator + new_section + "\n"
-
-                                with open(almanac_path, "w", encoding="utf-8") as f:
-                                    f.write(updated)
-
-                                conn = get_connection()
-                                cursor = conn.cursor()
-                                cursor.execute("DELETE FROM unanswered_questions WHERE id=%s", (qid,))
-                                conn.commit()
-                                cursor.close()
-                                conn.close()
-
-                                st.session_state[f"show_add_form_{qid}"] = False
-                                st.success("✅ Added to the almanac! Nova can answer this immediately - no restart needed.")
-                                st.rerun()
+                                    added = append_suggested_almanac_entry(qid, topic, answer)
+                                except Exception as e:
+                                    st.error(f"Could not add to the almanac: {e}")
+                                else:
+                                    st.session_state[f"show_add_form_{qid}"] = False
+                                    if added:
+                                        st.success("Added to the almanac. Nova will use it within about a minute.")
+                                    else:
+                                        st.warning("This suggestion was already handled. The almanac was not changed.")
+                                    st.rerun()
 
 
 # =========================================================

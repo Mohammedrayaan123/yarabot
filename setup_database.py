@@ -7,6 +7,7 @@ duplicate the database, it'll just make sure it exists).
 """
 
 import mysql.connector
+from pathlib import Path
 from config import DB_CONFIG
 from nlp_helpers import INTENT_DATA
 
@@ -295,17 +296,32 @@ CREATE TABLE IF NOT EXISTS intent_phrases (
 )
 """
 
+tables["school_almanac"] = """
+CREATE TABLE IF NOT EXISTS school_almanac (
+    id TINYINT PRIMARY KEY,
+    content LONGTEXT NOT NULL,
+    version BIGINT UNSIGNED NOT NULL DEFAULT 1
+)
+"""
+
 # FK order: departments must exist before teachers (teachers.department_id).
 # timetable/teacher_subjects/class_teachers need subjects/teachers, so those
 # go after both. system_logs needs users to already exist (performed_by FK).
 creation_order = ["departments", "subjects", "teachers", "teacher_subjects", "class_teachers",
                    "students", "timetable", "exams", "notes", "notices",
                    "unanswered_questions", "learned_phrases", "users", "complaints",
-                   "system_settings", "system_logs", "tie_break_log", "intent_phrases"]
+                   "system_settings", "system_logs", "tie_break_log", "intent_phrases",
+                   "school_almanac"]
 
 for table_name in creation_order:
     cursor.execute(tables[table_name])
     print(f"Table '{table_name}' ready.")
+
+# Seed once from the bundled file. Later dashboard edits remain authoritative.
+cursor.execute(
+    "INSERT IGNORE INTO school_almanac (id, content, version) VALUES (1, %s, 1)",
+    (Path(__file__).with_name("school_almanac.txt").read_text(encoding="utf-8"),)
+)
 
 # One-time seed migration: intent_phrases starts empty on a fresh/existing
 # DB, and nlp_helpers.py's INTENT_DATA is the bootstrap source of truth for

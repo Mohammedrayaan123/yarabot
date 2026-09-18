@@ -25,42 +25,7 @@ import mysql.connector
 from google import genai
 from openai import OpenAI
 from config import DB_CONFIG
-
-
-def load_almanac(path='school_almanac.txt'):
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except FileNotFoundError:
-        return ''
-
-
-# The dashboard's Almanac editor writes this file directly and needs
-# changes to take effect without a Flask restart. Re-reading on every
-# question would work but almanac_top_score() runs on nearly every chat
-# message (including the NLP-lane tie-break), so we cache by mtime instead -
-# a cheap stat call per question instead of a full read.
-ALMANAC_PATH = 'school_almanac.txt'
-_almanac_cache = {'content': load_almanac(ALMANAC_PATH), 'mtime_ns': None}
-try:
-    _almanac_cache['mtime_ns'] = os.stat(ALMANAC_PATH).st_mtime_ns
-except OSError:
-    pass
-
-
-def get_almanac():
-    try:
-        current_mtime = os.stat(ALMANAC_PATH).st_mtime_ns
-    except OSError:
-        return _almanac_cache['content']
-
-    if current_mtime != _almanac_cache['mtime_ns']:
-        _almanac_cache['content'] = load_almanac(ALMANAC_PATH)
-        _almanac_cache['mtime_ns'] = current_mtime
-        print(f"[ALMANAC RELOADED] {len(_almanac_cache['content'])} chars")
-
-    return _almanac_cache['content']
-
+from almanac_store import get_almanac, get_almanac_snapshot
 
 
 _ROMAN_GRADES = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
@@ -158,8 +123,9 @@ def _almanac_question_words(question):
     return words, grade_n
 
 
-def _score_almanac_sections(question):
-    almanac = get_almanac()
+def _score_almanac_sections(question, almanac=None):
+    if almanac is None:
+        almanac = get_almanac()
     if not almanac:
         return []
 
@@ -196,8 +162,8 @@ def _score_almanac_sections(question):
     return scored
 
 
-def search_almanac(question):
-    scored = _score_almanac_sections(question)
+def search_almanac(question, almanac=None):
+    scored = _score_almanac_sections(question, almanac)
     top = [section for _, section in scored[:3]]
 
     grade_n = _question_grade_number(question.lower())
@@ -515,11 +481,11 @@ def _overlap_score(words_a, words_b):
 
 def find_cached_answer(normalized_question):
     """Return an unexpired answer only for this exact cache key."""
-    get_almanac()  # Refresh the file version before considering an old answer.
+    _, current_version = get_almanac_snapshot()
     entry = _cache.get(normalized_question)
     if entry is None:
         return None
-    if entry.get('almanac_version') != _almanac_cache['mtime_ns']:
+    if entry.get('almanac_version') != current_version:
         del _cache[normalized_question]
         return None
     if time.time() - entry['timestamp'] > CACHE_TTL_SECONDS:
@@ -658,8 +624,8 @@ def gemini_answer(question, visible_roles=()):
         if cached:
             return cached
 
-    almanac_context = search_almanac(question)
-    almanac_version = _almanac_cache['mtime_ns']
+    almanac_content, almanac_version = get_almanac_snapshot()
+    almanac_context = search_almanac(question, almanac_content)
     context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:
@@ -714,8 +680,8 @@ def gemini_answer_stream(question, visible_roles=()):
             yield cached
             return
 
-    almanac_context = search_almanac(question)
-    almanac_version = _almanac_cache['mtime_ns']
+    almanac_content, almanac_version = get_almanac_snapshot()
+    almanac_context = search_almanac(question, almanac_content)
     context = f"{almanac_context}\n\n{notice_context}".strip() if notice_context else almanac_context
 
     if FORCE_GROQ:

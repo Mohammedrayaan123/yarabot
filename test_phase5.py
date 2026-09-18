@@ -1,11 +1,9 @@
 """Grounding and almanac-version regressions from the verified audit."""
 
-import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
+import almanac_store
 import gemini_rag
 
 
@@ -30,25 +28,32 @@ class AlmanacTests(unittest.TestCase):
         self.assertTrue(gemini_rag.almanac_match_confidence("when do i pay fees")[1])
 
     def test_almanac_edit_invalidates_an_answer_for_the_same_question(self):
-        old_state = gemini_rag._almanac_cache.copy()
+        old_state = almanac_store._cache.copy()
         gemini_rag._cache.clear()
-        self.addCleanup(gemini_rag._almanac_cache.update, old_state)
+        self.addCleanup(almanac_store._cache.update, old_state)
         self.addCleanup(gemini_rag._cache.clear)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "almanac.txt"
-            path.write_text("SCHOOL HOURS\nOpening time: 7 AM.", encoding="utf-8")
-            with patch.object(gemini_rag, "ALMANAC_PATH", str(path)), \
-                 patch.object(gemini_rag, "ask_gemini", side_effect=lambda _q, context: context) as model:
-                first = gemini_rag.gemini_answer("school hours")
-                self.assertEqual(gemini_rag.gemini_answer("school hours"), first)
-                self.assertEqual(model.call_count, 1)
-                old_mtime = path.stat().st_mtime_ns
-                path.write_text("SCHOOL HOURS\nOpening time: 8 AM.", encoding="utf-8")
-                os.utime(path, ns=(old_mtime + 1_000_000, old_mtime + 1_000_000))
-                second = gemini_rag.gemini_answer("school hours")
-                self.assertIn("8 AM", second)
-                self.assertNotEqual(first, second)
-                self.assertEqual(model.call_count, 2)
+        record = [("SCHOOL HOURS\nOpening time: 7 AM.", 1)]
+        with patch.object(almanac_store, "read_almanac", side_effect=lambda: record[0]), \
+             patch.object(gemini_rag, "ask_gemini", side_effect=lambda _q, context: context) as model:
+            almanac_store.get_almanac_snapshot(force=True)
+            first = gemini_rag.gemini_answer("school hours")
+            self.assertEqual(gemini_rag.gemini_answer("school hours"), first)
+            self.assertEqual(model.call_count, 1)
+            record[0] = ("SCHOOL HOURS\nOpening time: 8 AM.", 2)
+            almanac_store.get_almanac_snapshot(force=True)
+            second = gemini_rag.gemini_answer("school hours")
+            self.assertIn("8 AM", second)
+            self.assertNotEqual(first, second)
+            self.assertEqual(model.call_count, 2)
+
+    def test_almanac_db_outage_serves_last_good_snapshot(self):
+        old_state = almanac_store._cache.copy()
+        self.addCleanup(almanac_store._cache.update, old_state)
+        with patch.object(almanac_store, "read_almanac", return_value=("SCHOOL HOURS\n7 AM", 3)):
+            self.assertEqual(almanac_store.get_almanac_snapshot(force=True)[1], 3)
+        with patch.object(almanac_store, "read_almanac", side_effect=OSError("database offline")):
+            self.assertEqual(almanac_store.get_almanac_snapshot(force=True),
+                             ("SCHOOL HOURS\n7 AM", 3))
 
 
 if __name__ == "__main__":
