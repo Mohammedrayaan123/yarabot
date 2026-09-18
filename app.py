@@ -993,6 +993,49 @@ def _complaints_today(student_id):
     return result[0] if result else 0
 
 
+def _save_complaint(student_id, teacher_id, complaint_text, category, anonymous):
+    """Lock this student while checking the daily limit and saving a complaint."""
+    conn = get_db()
+    if conn is None:
+        return "error"
+
+    cursor = None
+    try:
+        conn.start_transaction()
+        cursor = conn.cursor()
+        cursor.execute("SELECT student_id FROM students WHERE student_id=%s FOR UPDATE", (student_id,))
+        if cursor.fetchone() is None:
+            conn.rollback()
+            return "error"
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM complaints WHERE student_id=%s AND created_at >= CURDATE()",
+            (student_id,)
+        )
+        if cursor.fetchone()[0] >= MAX_COMPLAINTS_PER_DAY:
+            conn.rollback()
+            return "limited"
+
+        cursor.execute(
+            """INSERT INTO complaints (student_id, teacher_id, complaint_text, category, anonymous)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (student_id, teacher_id, complaint_text, category, anonymous)
+        )
+        conn.commit()
+        return "saved"
+    except Exception as e:
+        print(f"DB error saving complaint: {e}")
+        try:
+            conn.rollback()
+        except mysql.connector.Error:
+            pass
+        return "error"
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+
+
 @app.route("/complaint")
 def complaint_page():
     """Same session/auth as the chatbot - not a separate site. Anyone not
@@ -1058,17 +1101,14 @@ def complaint_submit():
     if teacher_id not in valid_teacher_ids:
         return jsonify({"success": False, "error": "Please choose a valid teacher."}), 400
 
-    if _complaints_today(student_id) >= MAX_COMPLAINTS_PER_DAY:
+    result = _save_complaint(student_id, teacher_id, complaint_text, category, anonymous)
+    if result == "limited":
         return jsonify({
             "success": False,
             "error": f"You've reached today's limit of {MAX_COMPLAINTS_PER_DAY} complaints. Please try again tomorrow."
         }), 429
-
-    query(
-        """INSERT INTO complaints (student_id, teacher_id, complaint_text, category, anonymous)
-           VALUES (%s, %s, %s, %s, %s)""",
-        (student_id, teacher_id, complaint_text, category, anonymous)
-    )
+    if result == "error":
+        return jsonify({"success": False, "error": "Couldn't save your complaint right now. Please try again."}), 503
     return jsonify({"success": True})
 
 
@@ -1252,12 +1292,14 @@ def vp_complaint_update(complaint_id):
     if status not in ("new", "under_review", "resolved"):
         return jsonify({"error": "Invalid status."}), 400
 
-    query(
+    result = query(
         """UPDATE complaints
            SET status=%s, resolution_notes=%s, reviewed_at=NOW(), reviewed_by=%s
            WHERE complaint_id=%s""",
         (status, resolution_notes, session.get("user_id"), complaint_id)
     )
+    if result is None:
+        return jsonify({"success": False, "error": "Couldn't update the complaint right now. Please try again."}), 503
     return jsonify({"success": True})
 
 
