@@ -193,7 +193,17 @@ GREETING_ONLY_PHRASES = {
     "good morning", "good afternoon", "good evening",
     "thanks", "thank you", "thanks a lot", "thx", "ty",
     "help", "what can you do", "what do you do",
+    "how are u", "how are you",
 }
+
+
+def _normalized_greeting(question):
+    """Normalize punctuation once for both greeting routing and replies."""
+    return question.strip().lower().translate(str.maketrans('', '', '?!.,'))
+
+
+def _is_wellbeing_greeting(question):
+    return _normalized_greeting(question) in ("how are u", "how are you")
 
 
 def is_pure_greeting(question):
@@ -205,10 +215,7 @@ def is_pure_greeting(question):
     to Gemini and burn a quota-limited API call on a message NLP was
     already fully equipped to answer.
     """
-    cleaned = question.strip().lower()
-    for ch in '?!.,':
-        cleaned = cleaned.replace(ch, '')
-    return cleaned in GREETING_ONLY_PHRASES
+    return _normalized_greeting(question) in GREETING_ONLY_PHRASES
 
 
 # The intent names each role's answer_*() actually recognizes (mirrors the
@@ -1476,7 +1483,7 @@ def _resume_clarification_reply(intent, question, linked_id, original_message):
 def _is_topic_switch(question, role, pending_intent):
     """
     True if the follow-up looks like its own fresh question rather than a
-    bare answer to a pending clarification - a '?' together with a
+    bare answer to a pending clarification - a
     confident (phrase-backed, score >= NLP_PHRASE_MATCH_SCORE) match for
     some OTHER intent is strong evidence the user moved on to something
     else, not just answering what was asked.
@@ -1487,8 +1494,6 @@ def _is_topic_switch(question, role, pending_intent):
     because "science" also happens to be a valid subject name that
     handler's own extraction would have matched.
     """
-    if "?" not in question:
-        return False
     intent, score = detect_intent_with_score(question, _personal_intents_for_role(role))
     return intent is not None and intent != pending_intent and score >= NLP_PHRASE_MATCH_SCORE
 
@@ -1811,9 +1816,11 @@ TEACHER_NAME_TITLES = {"mr", "mrs", "ms", "miss", "dr", "mx"}
 
 def extract_day_from_question(question):
     """Returns the day name if mentioned in the question, else None.
-    Also recognizes 'today' and converts it to the actual current day name."""
+    Also resolves 'today' and 'tomorrow' relative to the current date."""
     q = question.lower()
-    if "today" in q:
+    if re.search(r"\btomorrow\b", q):
+        return (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%A").lower()
+    if re.search(r"\btoday\b", q):
         return datetime.datetime.now().strftime("%A").lower()
     for day in DAY_NAMES:
         if day in q:
@@ -2844,7 +2851,7 @@ def answer_student(question, student_id, forced_intent=None):
     # forced_intent: set by the classifier lane when it already picked the
     # intent (see classify_personal_intent() in gemini_rag.py) - skips
     # detect_intent() and goes straight into the same dispatch below.
-    intent = forced_intent if forced_intent is not None else detect_intent(
+    intent = "greeting" if _is_wellbeing_greeting(question) else forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "attendance", "exam", "timetable", "fee",
          "identity", "roll_number", "my_class", "class_teacher", "next_period",
@@ -2863,6 +2870,8 @@ def answer_student(question, student_id, forced_intent=None):
         intent = "subject_teacher"
 
     if intent == "greeting":
+        if _is_wellbeing_greeting(question):
+            return "I'm doing well, thanks."
         return "Hi, I'm Nova! Ask me about your attendance, exams, timetable, or fees. 😊"
     elif intent == "thanks":
         return "You're welcome! Let me know if you need anything else. 👍"
@@ -2955,7 +2964,7 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
     # in this function treats all three identically. Defaults to "teacher"
     # so existing callers (e.g. nlp_audit_test.py) that don't pass it are
     # unaffected.
-    intent = forced_intent if forced_intent is not None else detect_intent(
+    intent = "greeting" if _is_wellbeing_greeting(question) else forced_intent if forced_intent is not None else detect_intent(
         question,
         ["greeting", "thanks", "help", "period_count", "timetable", "classes_assigned",
          "next_class", "current_class", "free_periods", "periods_remaining", "teacher_identity",
@@ -2963,6 +2972,8 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
     )
 
     if intent == "greeting":
+        if _is_wellbeing_greeting(question):
+            return "I'm doing well, thanks."
         return "Hi, I'm Nova! Ask me about your schedule, periods, or classes. 😊"
     elif intent == "thanks":
         return "You're welcome! 👍"
@@ -3068,7 +3079,9 @@ def answer_teacher(question, teacher_id, forced_intent=None, extra_intents=None,
 
 def answer_principal(question, forced_intent=None):
     # forced_intent: see answer_student()'s matching comment above.
-    if forced_intent is not None:
+    if _is_wellbeing_greeting(question):
+        intent = "greeting"
+    elif forced_intent is not None:
         intent = forced_intent
     else:
         # rank_intents() + _apply_subject_scoring_adjustment(), not
@@ -3122,6 +3135,8 @@ def answer_principal(question, forced_intent=None):
         intent = "school_wide_subject_teacher"
 
     if intent == "greeting":
+        if _is_wellbeing_greeting(question):
+            return "I'm doing well, thanks."
         return "Good day! I'm Nova. Ask me about student numbers, teachers, or class breakdowns. 😊"
     elif intent == "thanks":
         return "You're welcome! 👍"

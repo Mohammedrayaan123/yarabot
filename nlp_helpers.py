@@ -1,6 +1,7 @@
 
 import difflib
 import re
+import threading
 import time
 
 import mysql.connector
@@ -638,6 +639,7 @@ INTENT_DATA = {
 # =========================================================
 _PHRASE_CACHE_TTL = 60  # seconds
 _phrase_cache = {"data": None, "loaded_at": 0.0}
+_phrase_cache_refresh_lock = threading.Lock()
 
 
 def _fetch_phrases_from_db():
@@ -680,16 +682,17 @@ def refresh_phrase_cache(force=False):
     brand-new, not-yet-migrated database keep working with zero manual
     setup.
     """
-    now = time.time()
-    if not force and _phrase_cache["data"] is not None and now - _phrase_cache["loaded_at"] < _PHRASE_CACHE_TTL:
-        return
+    with _phrase_cache_refresh_lock:
+        now = time.time()
+        if not force and _phrase_cache["data"] is not None and now - _phrase_cache["loaded_at"] < _PHRASE_CACHE_TTL:
+            return
 
-    fetched = _fetch_phrases_from_db()
-    if fetched:
-        _phrase_cache["data"] = fetched
-    elif _phrase_cache["data"] is None:
-        _phrase_cache["data"] = {name: list(data["phrases"]) for name, data in INTENT_DATA.items()}
-    _phrase_cache["loaded_at"] = now
+        fetched = _fetch_phrases_from_db()
+        if fetched:
+            _phrase_cache["data"] = fetched
+        elif _phrase_cache["data"] is None:
+            _phrase_cache["data"] = {name: list(data["phrases"]) for name, data in INTENT_DATA.items()}
+        _phrase_cache["loaded_at"] = time.time()
 
 
 def _phrases_for(intent_name):
@@ -884,10 +887,9 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
     phrase_matched = False
     phrases = phrase_override if phrase_override is not None else _phrases_for(intent_name)
     for phrase in phrases:
-        # \b-anchored, not a bare substring `in` check - "next period" was
-        # matching inside "next periodical" (word-glued at the tail), same
-        # bug class as extract_teacher_name_from_question()'s "Ann"/"annual".
-        if re.search(r'\b' + re.escape(phrase) + r'\b', cleaned_question):
+        # Explicit word lookarounds also work for punctuation-ending phrases
+        # such as "attendance %", while excluding "next periodical".
+        if re.search(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', cleaned_question):
             score += 3
             phrase_matched = True
 
