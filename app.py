@@ -452,6 +452,18 @@ def _apply_subject_scoring_adjustment(ranked, question):
     return adjusted
 
 
+def _apply_teacher_location_guard(ranked, question):
+    """Require a teacher reference before trusting a generic location phrase."""
+    if not any(name == "teacher_location" for name, _ in ranked):
+        return ranked
+    if re.search(r'\b(teacher|staff|faculty|mr|mrs|ms|miss|dr|he|she|him|her)\b', question):
+        return ranked
+    teacher_id, _, ambiguity = extract_teacher_name_from_question(question, _teachers_with_subjects())
+    if teacher_id or ambiguity:
+        return ranked
+    return [pair for pair in ranked if pair[0] != "teacher_location"]
+
+
 def _nlp_lane_decision(question, role):
     """
     Core routing decision behind use_nlp_lane() (plain bool) and
@@ -531,6 +543,8 @@ def _nlp_lane_decision(question, role):
 
     ranked = rank_intents(question, _personal_intents_for_role(role))
     ranked = _apply_subject_scoring_adjustment(ranked, question)
+    if role in PRINCIPAL_LIKE_ROLES:
+        ranked = _apply_teacher_location_guard(ranked, question)
     intent, nlp_score = ranked[0] if ranked else (None, 0)
 
     if intent is not None:
@@ -3098,6 +3112,7 @@ def answer_principal(question, forced_intent=None):
             "low_attendance_count", "pending_fees_count", "notices", "subjects_offered"
         ])
         principal_ranked = _apply_subject_scoring_adjustment(principal_ranked, question)
+        principal_ranked = _apply_teacher_location_guard(principal_ranked, question)
         intent = principal_ranked[0][0] if principal_ranked else None
 
     # teacher_schedule_lookup's "schedule for" and school_wide_subject_

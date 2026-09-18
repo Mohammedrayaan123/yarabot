@@ -882,6 +882,18 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
     actually adding it.
     """
     data = INTENT_DATA[intent_name]
+
+    # A total-count phrase can be a prefix of a more specific question.
+    # Keep the qualifier with the intent that can actually answer it.
+    if intent_name == "period_count" and re.search(r'\b(left|remaining)\b|\bto go\b', cleaned_question):
+        return 0
+    if intent_name == "total_teachers" and re.search(r'\b(free|available)\b', cleaned_question):
+        return 0
+    if intent_name == "teacher_identity" and re.search(r'\bdepartment\s+(?:head|lead|chair)\b', cleaned_question):
+        return 0
+    if intent_name == "my_class" and re.search(r'\b(?:head|teacher|in charge|responsible)\b.*\b(?:my\s+)?class\b|\bmy\s+class\b.*\b(?:head|teacher|in charge|responsible)\b', cleaned_question):
+        return 0
+
     score = 0
 
     phrase_matched = False
@@ -904,6 +916,12 @@ def score_intent(cleaned_question, words, intent_name, personal_signal, class_co
         if matched_keyword in AMBIGUOUS_KEYWORDS and not phrase_matched and not bypass_signal:
             continue
         score += 1
+
+    if intent_name == "free_teachers" and re.search(r'\bhow many teachers?\s+(?:are|is)\s+(?:free|available)\b', cleaned_question):
+        score += 3
+    if (intent_name == "classroom_occupant" and class_code_present
+            and re.search(r'\bteachers?\b.*\bteaching\b.*\bnow\b', cleaned_question)):
+        score += 4
 
     return score
 
