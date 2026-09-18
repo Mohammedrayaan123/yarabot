@@ -395,7 +395,12 @@ def ask_gemini_stream(question, context):
 # =========================================================
 _cache = {}  # {normalized_question: {"answer": str, "timestamp": float}}
 CACHE_TTL_SECONDS = 86400  # 24 hours — almanac data doesn't change daily
-CACHE_SIMILARITY_THRESHOLD = 0.85  # 85% similar = treat as same question
+CACHE_SIMILARITY_THRESHOLD = 0.85  # Unanswered-question grouping only
+
+
+def normalize_cache_question(question):
+    """Keep qualifiers in the cache key so distinct questions stay distinct."""
+    return ' '.join(re.findall(r"\b\w+\b", question.casefold()))
 
 
 def normalize_question(question):
@@ -438,43 +443,15 @@ def _overlap_score(words_a, words_b):
 
 
 def find_cached_answer(normalized_question):
-    """
-    Check cache for a similar question.
-
-    Uses word-overlap similarity, not character-level diffing: character
-    diffing punishes length differences too harshly on short questions (e.g.
-    "ptm" vs "ptm date" scores 0.55 despite one being a strict subset of the
-    other), so a short follow-up question would never hit the cache. Overlap
-    coefficient - how much of the SHORTER question's words appear in the
-    longer one - scores that pair 1.0 while still keeping unrelated short
-    questions ("ptm" vs "fee structure") apart at 0.0. Words are lightly
-    singularized first so "hajj holiday dates" still matches "hajj holidays".
-
-    Returns cached answer string or None if not found / expired.
-    """
-    now = time.time()
-    best_match = None
-    best_score = 0
-
-    query_words = _normalized_word_set(normalized_question)
-
-    for cached_q, entry in list(_cache.items()):
-        # Remove expired entries
-        if now - entry['timestamp'] > CACHE_TTL_SECONDS:
-            del _cache[cached_q]
-            continue
-
-        cached_words = _normalized_word_set(cached_q)
-        overlap = _overlap_score(query_words, cached_words)
-        if overlap > best_score:
-            best_score = overlap
-            best_match = entry['answer']
-
-    if best_score >= CACHE_SIMILARITY_THRESHOLD:
-        print(f'[CACHE HIT] Score: {best_score:.2f} | Question: {normalized_question}')
-        return best_match
-
-    return None
+    """Return an unexpired answer only for this exact cache key."""
+    entry = _cache.get(normalized_question)
+    if entry is None:
+        return None
+    if time.time() - entry['timestamp'] > CACHE_TTL_SECONDS:
+        del _cache[normalized_question]
+        return None
+    print(f'[CACHE HIT] Question: {normalized_question}')
+    return entry['answer']
 
 
 UNCACHEABLE_ANSWERS = {NO_CONTEXT_MESSAGE, API_ERROR_MESSAGE, GEMINI_DECLINED_PHRASE}
@@ -485,12 +462,9 @@ def log_unanswered_question(question):
     Records (or, for a near-duplicate phrasing, increments) an unanswered
     question in the unanswered_questions table.
 
-    Reuses find_cached_answer()'s exact grouping mechanism - same
-    normalize_question() + _normalized_word_set() + _overlap_score() at the
-    same CACHE_SIMILARITY_THRESHOLD (0.85) - so "when is sports day" and
-    "whens sports day" increment one row's ask_count instead of creating
-    separate near-duplicate entries, the same way they'd hit the same
-    cache entry.
+    Groups similar unanswered phrasings with normalize_question(),
+    _normalized_word_set(), and _overlap_score(). This grouping is separate
+    from the answer cache, which requires an exact normalized question.
 
     Best-effort: a DB hiccup here must never break the chat reply already
     being sent to the user, so failures are logged and swallowed rather
@@ -598,7 +572,7 @@ def cache_answer(normalized_question, answer):
 
 
 def gemini_answer(question, visible_roles=()):
-    normalized = normalize_question(question)
+    normalized = normalize_cache_question(question)
 
     notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
     used_notice = bool(notice_context)
@@ -652,7 +626,7 @@ def gemini_answer(question, visible_roles=()):
 
 def gemini_answer_stream(question, visible_roles=()):
 
-    normalized = normalize_question(question)
+    normalized = normalize_cache_question(question)
 
     notice_context = search_notice_context(question, visible_roles) if visible_roles else ''
     used_notice = bool(notice_context)
